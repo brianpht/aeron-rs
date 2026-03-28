@@ -151,11 +151,11 @@ The driver implements the Aeron media layer with io_uring replacing all traditio
 7. **Agent Duty Cycle**: Single-threaded spin loop — poll CQEs, dispatch frames, generate control messages, flush SQEs
 
 ```
-┌─────────────┐  SQE   ┌─────────────────────┐  io_uring_enter  ┌────────┐
-│ Agent       │───────▶│ UringTransportPoller │────────────────▶│ Kernel │
-│ (single-    │  CQE   │  SlotPool (pinned)   │◀────────────────│        │
-│  threaded)  │◀───────│  BufRingPool (shared)│                 └────────┘
-└─────────────┘        └─────────────────────┘
+┌─────────────┐  SQE   ┌──────────────────────┐  io_uring_enter  ┌────────┐
+│ Agent       │───────▶│ UringTransportPoller │─────────────────▶│ Kernel │
+│ (single-    │  CQE   │  SlotPool (pinned)   │◀─────────────────│        │
+│  threaded)  │◀───────│  BufRingPool (shared)│                  └────────┘
+└─────────────┘        └──────────────────────┘
 ```
 
 ## Configuration
