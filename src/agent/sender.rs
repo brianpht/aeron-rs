@@ -43,6 +43,12 @@ pub struct SenderAgent {
 
 impl SenderAgent {
     pub fn new(ctx: &DriverContext) -> Result<Self, AgentError> {
+        ctx.validate().map_err(|e| {
+            AgentError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                e.to_string(),
+            ))
+        })?;
         let poller = UringTransportPoller::new(ctx)?;
         Ok(Self {
             poller,

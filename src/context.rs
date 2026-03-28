@@ -1,5 +1,59 @@
 use std::time::Duration;
 
+use crate::media::buffer_pool::MAX_RECV_BUFFER;
+
+/// Validation error for `DriverContext`. Stack-only, no heap allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextValidationError {
+    /// `uring_ring_size` must be a power of two.
+    RingSizeNotPowerOfTwo,
+    /// `uring_buf_ring_entries` must be a power of two.
+    BufRingEntriesNotPowerOfTwo,
+    /// `uring_buf_ring_entries` must be ≤ 32768.
+    BufRingEntriesTooLarge,
+    /// `uring_buf_ring_entries` must be > 0.
+    BufRingEntriesZero,
+    /// `uring_send_slots` must be > 0.
+    SendSlotsZero,
+    /// `mtu_length` must be in [64, MAX_RECV_BUFFER].
+    MtuOutOfRange,
+    /// `heartbeat_interval_ns` must be > 0.
+    HeartbeatIntervalZero,
+    /// `sm_interval_ns` must be > 0.
+    SmIntervalZero,
+    /// `nak_delay_ns` must be > 0.
+    NakDelayZero,
+    /// `timer_interval_ns` must be > 0.
+    TimerIntervalZero,
+    /// `socket_rcvbuf` must be > 0.
+    SocketRcvbufZero,
+    /// `socket_sndbuf` must be > 0.
+    SocketSndbufZero,
+}
+
+impl std::fmt::Display for ContextValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RingSizeNotPowerOfTwo => f.write_str("uring_ring_size must be power-of-two"),
+            Self::BufRingEntriesNotPowerOfTwo => {
+                f.write_str("uring_buf_ring_entries must be power-of-two")
+            }
+            Self::BufRingEntriesTooLarge => {
+                f.write_str("uring_buf_ring_entries must be <= 32768")
+            }
+            Self::BufRingEntriesZero => f.write_str("uring_buf_ring_entries must be > 0"),
+            Self::SendSlotsZero => f.write_str("uring_send_slots must be > 0"),
+            Self::MtuOutOfRange => write!(f, "mtu_length must be in [64, {MAX_RECV_BUFFER}]"),
+            Self::HeartbeatIntervalZero => f.write_str("heartbeat_interval_ns must be > 0"),
+            Self::SmIntervalZero => f.write_str("sm_interval_ns must be > 0"),
+            Self::NakDelayZero => f.write_str("nak_delay_ns must be > 0"),
+            Self::TimerIntervalZero => f.write_str("timer_interval_ns must be > 0"),
+            Self::SocketRcvbufZero => f.write_str("socket_rcvbuf must be > 0"),
+            Self::SocketSndbufZero => f.write_str("socket_sndbuf must be > 0"),
+        }
+    }
+}
+
 /// Driver-level configuration. Mirrors aeron_driver_context_t.
 pub struct DriverContext {
     // ── Socket ──
@@ -62,6 +116,53 @@ impl Default for DriverContext {
     }
 }
 
+impl DriverContext {
+    /// Validate all configuration invariants.
+    ///
+    /// Returns the first violated constraint, or `Ok(())` if all checks pass.
+    /// Should be called at the top of `UringTransportPoller::new`,
+    /// `SenderAgent::new`, and `ReceiverAgent::new`.
+    pub fn validate(&self) -> Result<(), ContextValidationError> {
+        if self.uring_ring_size == 0 || !self.uring_ring_size.is_power_of_two() {
+            return Err(ContextValidationError::RingSizeNotPowerOfTwo);
+        }
+        if self.uring_buf_ring_entries == 0 {
+            return Err(ContextValidationError::BufRingEntriesZero);
+        }
+        if !self.uring_buf_ring_entries.is_power_of_two() {
+            return Err(ContextValidationError::BufRingEntriesNotPowerOfTwo);
+        }
+        if self.uring_buf_ring_entries > 32768 {
+            return Err(ContextValidationError::BufRingEntriesTooLarge);
+        }
+        if self.uring_send_slots == 0 {
+            return Err(ContextValidationError::SendSlotsZero);
+        }
+        if self.mtu_length < 64 || self.mtu_length > MAX_RECV_BUFFER {
+            return Err(ContextValidationError::MtuOutOfRange);
+        }
+        if self.heartbeat_interval_ns <= 0 {
+            return Err(ContextValidationError::HeartbeatIntervalZero);
+        }
+        if self.sm_interval_ns <= 0 {
+            return Err(ContextValidationError::SmIntervalZero);
+        }
+        if self.nak_delay_ns <= 0 {
+            return Err(ContextValidationError::NakDelayZero);
+        }
+        if self.timer_interval_ns <= 0 {
+            return Err(ContextValidationError::TimerIntervalZero);
+        }
+        if self.socket_rcvbuf == 0 {
+            return Err(ContextValidationError::SocketRcvbufZero);
+        }
+        if self.socket_sndbuf == 0 {
+            return Err(ContextValidationError::SocketSndbufZero);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +211,121 @@ mod tests {
         let ctx = DriverContext::default();
         assert_eq!(ctx.driver_timeout_ns, Duration::from_secs(10).as_nanos() as i64);
         assert_eq!(ctx.timer_interval_ns, Duration::from_millis(1).as_nanos() as i64);
+    }
+
+    // ── Validation tests ──
+
+    #[test]
+    fn default_context_validates() {
+        let ctx = DriverContext::default();
+        assert!(ctx.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_ring_size_not_power_of_two() {
+        let mut ctx = DriverContext::default();
+        ctx.uring_ring_size = 100;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::RingSizeNotPowerOfTwo));
+    }
+
+    #[test]
+    fn validate_ring_size_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.uring_ring_size = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::RingSizeNotPowerOfTwo));
+    }
+
+    #[test]
+    fn validate_buf_ring_entries_not_power_of_two() {
+        let mut ctx = DriverContext::default();
+        ctx.uring_buf_ring_entries = 100;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::BufRingEntriesNotPowerOfTwo));
+    }
+
+    #[test]
+    fn validate_buf_ring_entries_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.uring_buf_ring_entries = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::BufRingEntriesZero));
+    }
+
+    #[test]
+    fn validate_buf_ring_entries_too_large() {
+        let mut ctx = DriverContext::default();
+        ctx.uring_buf_ring_entries = 65535; // not power-of-two
+        assert!(ctx.validate().is_err());
+        // 32768 is the max valid value (power-of-two, ≤ 32768).
+        ctx.uring_buf_ring_entries = 32768;
+        assert!(ctx.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_send_slots_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.uring_send_slots = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::SendSlotsZero));
+    }
+
+    #[test]
+    fn validate_mtu_too_small() {
+        let mut ctx = DriverContext::default();
+        ctx.mtu_length = 32;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::MtuOutOfRange));
+    }
+
+    #[test]
+    fn validate_mtu_too_large() {
+        let mut ctx = DriverContext::default();
+        ctx.mtu_length = MAX_RECV_BUFFER + 1;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::MtuOutOfRange));
+    }
+
+    #[test]
+    fn validate_heartbeat_interval_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.heartbeat_interval_ns = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::HeartbeatIntervalZero));
+    }
+
+    #[test]
+    fn validate_sm_interval_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.sm_interval_ns = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::SmIntervalZero));
+    }
+
+    #[test]
+    fn validate_nak_delay_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.nak_delay_ns = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::NakDelayZero));
+    }
+
+    #[test]
+    fn validate_timer_interval_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.timer_interval_ns = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::TimerIntervalZero));
+    }
+
+    #[test]
+    fn validate_socket_rcvbuf_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.socket_rcvbuf = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::SocketRcvbufZero));
+    }
+
+    #[test]
+    fn validate_socket_sndbuf_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.socket_sndbuf = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::SocketSndbufZero));
+    }
+
+    #[test]
+    fn validation_error_display() {
+        let e = ContextValidationError::RingSizeNotPowerOfTwo;
+        let s = e.to_string();
+        assert!(s.contains("power-of-two"));
     }
 }

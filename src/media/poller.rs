@@ -74,6 +74,9 @@ pub struct PollResult {
     pub send_completions: u32,
     pub recv_errors: u32,
     pub send_errors: u32,
+    /// Number of CQEs the kernel dropped due to CQ ring overflow.
+    /// Non-zero means send slots were leaked and recovered.
+    pub cq_overflows: u32,
 }
 
 // ──────────────────────────── TransportPoller trait ────────────────────────────

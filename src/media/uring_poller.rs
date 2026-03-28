@@ -147,20 +147,31 @@ impl BufRingPool {
     /// Get the buffer data for a given buffer ID.
     ///
     /// `bid` is the buffer ID from `cqueue::buffer_select(flags)`.
-    /// `len` is clamped to `buf_size`.
+    /// `len` is clamped to `buf_size`. Returns empty slice if `bid` is
+    /// out of range (corrupt CQE safety).
     #[inline]
     fn buf_data(&self, bid: u16, len: usize) -> &[u8] {
+        if bid > self.mask {
+            return &[];
+        }
         let offset = bid as usize * self.buf_size as usize;
         let clamped = len.min(self.buf_size as usize);
         unsafe { std::slice::from_raw_parts(self.bufs_ptr.add(offset), clamped) }
     }
 
-    /// Return a buffer to the ring after processing.
+    /// Return a buffer to the ring locally (no atomic publish).
     ///
     /// Must be called exactly once per reaped CQE that consumed a buffer.
-    /// Uses Release ordering so the kernel sees entry data before tail update.
+    /// After all buffers in a batch are returned, call [`publish_tail`] once
+    /// to make them visible to the kernel. This reduces N atomic stores to 1
+    /// per poll cycle.
     #[inline]
-    fn return_buf(&mut self, bid: u16) {
+    fn return_buf_local(&mut self, bid: u16) {
+        // Bounds check: corrupt CQE could yield bid >= entries.
+        if bid > self.mask {
+            return;
+        }
+
         let entry_size = mem::size_of::<BufRingEntry>();
         let idx = (self.local_tail & self.mask) as usize;
         let entry =
@@ -173,8 +184,14 @@ impl BufRingPool {
         entry.set_bid(bid);
 
         self.local_tail = self.local_tail.wrapping_add(1);
+    }
 
-        // Publish the new tail so the kernel can pick up the recycled buffer.
+    /// Publish the current local_tail to the kernel-shared ring tail.
+    ///
+    /// Call once after a batch of [`return_buf_local`] calls. Single Release
+    /// store ensures the kernel sees all entry data before the tail advance.
+    #[inline]
+    fn publish_tail(&self) {
         let tail_ptr =
             unsafe { BufRingEntry::tail(self.ring_ptr as *const BufRingEntry) as *mut u16 };
         unsafe {
@@ -260,6 +277,10 @@ pub struct UringTransportPoller {
 
 impl UringTransportPoller {
     pub fn new(ctx: &DriverContext) -> io::Result<Self> {
+        ctx.validate().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
+        })?;
+
         let mut builder = IoUring::builder();
         if ctx.uring_sqpoll {
             builder.setup_sqpoll(ctx.uring_sqpoll_idle_ms);
@@ -362,9 +383,27 @@ impl UringTransportPoller {
 
         Ok(())
     }
-}
 
-// ──────────────────────────── CQE batch buffer ────────────────────────────
+    /// Recover send slots leaked by CQ overflow.
+    ///
+    /// When the kernel drops CQEs due to CQ ring overflow, we never receive
+    /// the send completion notifications and the slots stay InFlight forever.
+    /// This cold-path scan finds and frees them. O(N) where N = total send
+    /// slots, but only runs when overflow is detected.
+    fn recover_leaked_send_slots(&mut self) {
+        let mut recovered = 0u32;
+        for i in 0..self.pool.send_slots.len() {
+            if self.pool.send_slots[i].state == SlotState::InFlight {
+                self.pool.send_slots[i].state = SlotState::Free;
+                self.pool.free_send(i as u16);
+                recovered += 1;
+            }
+        }
+        if recovered > 0 {
+            tracing::warn!(recovered, "recovered leaked send slots after CQ overflow");
+        }
+    }
+}
 
 /// Maximum CQEs to harvest per poll cycle. CQEs beyond this stay in the
 /// completion queue and will be reaped on the next poll_recv call.
@@ -427,10 +466,25 @@ impl TransportPoller for UringTransportPoller {
         // Includes flags for buffer_select() and more() checks.
         let mut cqe_buf = [MaybeUninit::<(u64, i32, u32)>::uninit(); CQE_BATCH_SIZE];
         let mut cqe_count = 0usize;
+        let mut bufs_returned = false;
 
         {
             // SAFETY: single-threaded agent — no concurrent access to ring.
             let cq = unsafe { self.ring.completion_shared() };
+
+            // Detect CQ overflow — kernel dropped CQEs because the CQ ring
+            // was full. This means we lost send completion notifications and
+            // potentially multishot terminations.
+            let overflow = cq.overflow();
+            if overflow > 0 {
+                result.cq_overflows = overflow;
+                tracing::warn!(
+                    overflow,
+                    "io_uring CQ overflow — {} CQEs lost, recovering send slots",
+                    overflow
+                );
+            }
+
             for cqe in cq {
                 if cqe_count < CQE_BATCH_SIZE {
                     cqe_buf[cqe_count].write((cqe.user_data(), cqe.result(), cqe.flags()));
@@ -459,7 +513,7 @@ impl TransportPoller for UringTransportPoller {
                     if let Some(buf_id) = cqueue::buffer_select(cqe_flags) {
                         if ret > 0 && active {
                             // Scope: immutable borrow of buf_ring for buffer
-                            // access + callback. Released before return_buf.
+                            // access + callback. Released before return_buf_local.
                             let bytes = {
                                 let buf =
                                     self.buf_ring.buf_data(buf_id, ret as usize);
@@ -522,9 +576,9 @@ impl TransportPoller for UringTransportPoller {
                             }
                         }
 
-                        // Always return buffer to the ring, even for errors
-                        // or inactive transports.
-                        self.buf_ring.return_buf(buf_id);
+                        // Return buffer locally (deferred atomic publish).
+                        self.buf_ring.return_buf_local(buf_id);
+                        bufs_returned = true;
                     } else if ret < 0 {
                         // Error CQE without a buffer (e.g., multishot
                         // terminated with -ENOBUFS or -ECANCELED).
@@ -566,6 +620,19 @@ impl TransportPoller for UringTransportPoller {
 
                 _ => {}
             }
+        }
+
+        // Single atomic publish for all buf_ring returns in this batch.
+        // Reduces N Release stores to 1 per poll cycle.
+        if bufs_returned {
+            self.buf_ring.publish_tail();
+        }
+
+        // CQ overflow recovery: scan send slots for leaked in-flight entries.
+        // The kernel dropped their completion CQEs so we never freed them.
+        // This is a cold path — only runs when overflow is detected.
+        if result.cq_overflows > 0 {
+            self.recover_leaked_send_slots();
         }
 
         // Submit only if we pushed re-arm SQEs (multishot restart).
