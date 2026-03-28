@@ -1,0 +1,44 @@
+[package]
+name = "aeron-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2"
+thiserror = "2"
+tracing = "0.1"
+socket2 = { version = "0.6.3", features = ["all"] }
+io-uring = "0.7"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "frame_parse"
+harness = false
+
+[[bench]]
+name = "slot_pool"
+harness = false
+
+[[bench]]
+name = "clock"
+harness = false
+
+[[bench]]
+name = "publication_offer"
+harness = false
+
+[[bench]]
+name = "cqe_dispatch"
+harness = false
+
+[[bench]]
+name = "loss_recovery"
+harness = false
+
+[[bench]]
+name = "io_uring_submit"
+harness = false
+[[example]]
+name = "diag_ping"
