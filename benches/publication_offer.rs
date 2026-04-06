@@ -1,10 +1,14 @@
 //! Benchmark: publication offer latency.
 //!
-//! Measures the hot-path cost of constructing a data frame header into a
-//! scratch buffer and submitting it via `TransportPoller::submit_send`.
-//! This approximates the per-message cost of `NetworkPublication::offer()`.
+//! Measures the hot-path cost of:
+//! - Frame header construction into a scratch buffer
+//! - `TransportPoller::submit_send` (slot alloc + SQE push)
+//! - `SendChannelEndpoint::send_heartbeat` (build + submit)
+//! - `NetworkPublication::offer()` (term buffer write)
+//! - `NetworkPublication::sender_scan()` (frame walk)
+//! - Combined offer + sender_scan round-trip
 //!
-//! Target: < 40 ns (vs Aeron C ~40–80 ns conductor offer).
+//! Target: offer < 40 ns, sender_scan < 30 ns per frame.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -13,10 +17,16 @@ use std::net::SocketAddr;
 use aeron_rs::context::DriverContext;
 use aeron_rs::frame::*;
 use aeron_rs::media::channel::UdpChannel;
+use aeron_rs::media::network_publication::{NetworkPublication, OfferError};
 use aeron_rs::media::poller::TransportPoller;
 use aeron_rs::media::send_channel_endpoint::SendChannelEndpoint;
 use aeron_rs::media::transport::UdpChannelTransport;
 use aeron_rs::media::uring_poller::UringTransportPoller;
+
+// ──────────────────── Constants ────────────────────
+
+const BENCH_TERM_LENGTH: u32 = 64 * 1024; // 64 KiB
+const BENCH_MTU: u32 = 1408;
 
 // ──────────────────── Helpers ────────────────────
 
@@ -33,15 +43,20 @@ fn make_poller_and_transport() -> (UringTransportPoller, usize) {
     let remote = channel.remote_data;
     let mut transport = UdpChannelTransport::open(&channel, &local, &remote, &ctx).unwrap();
     let t_idx = poller.add_transport(&mut transport).unwrap();
-    // Keep transport alive — leak it (bench scope).
+    // Keep transport alive - leak it (bench scope).
     std::mem::forget(transport);
     (poller, t_idx)
+}
+
+fn make_publication() -> NetworkPublication {
+    NetworkPublication::new(42, 10, 0, BENCH_TERM_LENGTH, BENCH_MTU)
+        .expect("valid bench params")
 }
 
 // ──────────────────── Benchmarks ────────────────────
 
 /// Pure CPU cost of building a DataHeader into a scratch buffer.
-/// No io_uring, no syscall — isolates the frame construction.
+/// No io_uring, no syscall - isolates the frame construction.
 fn bench_offer_frame_build(c: &mut Criterion) {
     let mut scratch = [0u8; DATA_HEADER_LENGTH + 1408];
 
@@ -141,11 +156,170 @@ fn bench_offer_heartbeat(c: &mut Criterion) {
     });
 }
 
+/// NetworkPublication::offer() with an empty payload (header-only frame).
+/// Measures: partition lookup (bitmask), header build, memcpy into term buffer,
+/// position update. No io_uring interaction.
+fn bench_publication_offer_empty(c: &mut Criterion) {
+    let mut pub_ = make_publication();
+
+    c.bench_function("offer: NetworkPublication::offer (empty payload)", |b| {
+        b.iter(|| {
+            match pub_.offer(black_box(&[])) {
+                Ok(pos) => { black_box(pos); },
+                Err(OfferError::AdminAction) => {
+                    // Term rotated - retry immediately (expected periodically).
+                    let _ = pub_.offer(&[]);
+                },
+                Err(OfferError::BackPressured) => {
+                    // Drain sender_position so publisher can continue.
+                    pub_.sender_scan(u32::MAX, |_, _| {});
+                    let _ = pub_.offer(&[]);
+                },
+                Err(_) => {},
+            }
+        });
+    });
+}
+
+/// NetworkPublication::offer() with a 64-byte payload (typical small message).
+fn bench_publication_offer_64b(c: &mut Criterion) {
+    let mut pub_ = make_publication();
+    let payload = [0xABu8; 64];
+
+    c.bench_function("offer: NetworkPublication::offer (64B payload)", |b| {
+        b.iter(|| {
+            match pub_.offer(black_box(&payload)) {
+                Ok(pos) => { black_box(pos); },
+                Err(OfferError::AdminAction) => {
+                    let _ = pub_.offer(&payload);
+                },
+                Err(OfferError::BackPressured) => {
+                    pub_.sender_scan(u32::MAX, |_, _| {});
+                    let _ = pub_.offer(&payload);
+                },
+                Err(_) => {},
+            }
+        });
+    });
+}
+
+/// NetworkPublication::offer() with a 1024-byte payload (medium message).
+fn bench_publication_offer_1k(c: &mut Criterion) {
+    let mut pub_ = make_publication();
+    let payload = [0xCDu8; 1024];
+
+    c.bench_function("offer: NetworkPublication::offer (1KiB payload)", |b| {
+        b.iter(|| {
+            match pub_.offer(black_box(&payload)) {
+                Ok(pos) => { black_box(pos); },
+                Err(OfferError::AdminAction) => {
+                    let _ = pub_.offer(&payload);
+                },
+                Err(OfferError::BackPressured) => {
+                    pub_.sender_scan(u32::MAX, |_, _| {});
+                    let _ = pub_.offer(&payload);
+                },
+                Err(_) => {},
+            }
+        });
+    });
+}
+
+/// sender_scan: walk a single frame after offer.
+/// Measures: position calculation, partition lookup, frame length read, emit
+/// callback invocation, position advance.
+fn bench_sender_scan_single(c: &mut Criterion) {
+    let mut pub_ = make_publication();
+
+    c.bench_function("scan: sender_scan (1 frame, re-offer each iter)", |b| {
+        b.iter(|| {
+            // Offer one frame then scan it.
+            match pub_.offer(&[0u8; 64]) {
+                Ok(_) => {},
+                Err(OfferError::AdminAction) => { let _ = pub_.offer(&[0u8; 64]); },
+                Err(OfferError::BackPressured) => {
+                    pub_.sender_scan(u32::MAX, |_, _| {});
+                    let _ = pub_.offer(&[0u8; 64]);
+                },
+                Err(_) => {},
+            }
+            let scanned = pub_.sender_scan(black_box(BENCH_MTU), |off, data| {
+                black_box(off);
+                black_box(data);
+            });
+            black_box(scanned);
+        });
+    });
+}
+
+/// sender_scan: walk a batch of 16 frames.
+/// Pre-fills 16 frames, then scans all in one call.
+fn bench_sender_scan_batch_16(c: &mut Criterion) {
+    let mut pub_ = make_publication();
+
+    c.bench_function("scan: sender_scan (batch 16 frames)", |b| {
+        b.iter(|| {
+            // Fill 16 frames.
+            for _ in 0..16 {
+                match pub_.offer(&[0u8; 64]) {
+                    Ok(_) => {},
+                    Err(OfferError::AdminAction) => { let _ = pub_.offer(&[0u8; 64]); },
+                    Err(OfferError::BackPressured) => {
+                        pub_.sender_scan(u32::MAX, |_, _| {});
+                        let _ = pub_.offer(&[0u8; 64]);
+                    },
+                    Err(_) => {},
+                }
+            }
+            // Scan all 16.
+            let scanned = pub_.sender_scan(black_box(u32::MAX), |off, data| {
+                black_box(off);
+                black_box(data);
+            });
+            black_box(scanned);
+        });
+    });
+}
+
+/// Combined offer + sender_scan: write one frame and immediately scan it.
+/// Represents the steady-state single-message latency through the term buffer.
+fn bench_offer_then_scan(c: &mut Criterion) {
+    let mut pub_ = make_publication();
+
+    c.bench_function("offer+scan: offer 64B then sender_scan", |b| {
+        let payload = [0xABu8; 64];
+        b.iter(|| {
+            // Offer.
+            match pub_.offer(black_box(&payload)) {
+                Ok(pos) => { black_box(pos); },
+                Err(OfferError::AdminAction) => { let _ = pub_.offer(&payload); },
+                Err(OfferError::BackPressured) => {
+                    pub_.sender_scan(u32::MAX, |_, _| {});
+                    let _ = pub_.offer(&payload);
+                },
+                Err(_) => {},
+            }
+            // Scan.
+            let scanned = pub_.sender_scan(black_box(BENCH_MTU), |off, data| {
+                black_box(off);
+                black_box(data);
+            });
+            black_box(scanned);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_offer_frame_build,
     bench_offer_with_submit,
     bench_offer_heartbeat,
+    bench_publication_offer_empty,
+    bench_publication_offer_64b,
+    bench_publication_offer_1k,
+    bench_sender_scan_single,
+    bench_sender_scan_batch_16,
+    bench_offer_then_scan,
 );
 criterion_main!(benches);
 

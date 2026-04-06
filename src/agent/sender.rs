@@ -5,24 +5,164 @@ use super::{Agent, AgentError};
 use crate::clock::CachedNanoClock;
 
 use crate::context::DriverContext;
+use crate::media::concurrent_publication::{
+    ConcurrentPublication, SenderPublication, new_concurrent,
+};
+use crate::media::network_publication::NetworkPublication;
 use crate::media::poller::{RecvMessage, TransportPoller};
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::uring_poller::UringTransportPoller;
 
 /// Represents one active network publication within the sender.
-struct PublicationEntry {
-    session_id: i32,
-    stream_id: i32,
-    term_id: i32,
-    term_offset: i32,
-    term_length: i32,
-    mtu: i32,
-    endpoint_idx: usize,
-    /// Destination for unconnected sends.
-    dest_addr: Option<libc::sockaddr_storage>,
-    needs_setup: bool,
-    time_of_last_send_ns: i64,
-    time_of_last_setup_ns: i64,
+/// Enum dispatch (no dyn - per coding rules) to support both local
+/// (single-threaded) and concurrent (cross-thread) publication modes.
+enum PublicationEntry {
+    /// Single-threaded publication - offer and scan on same thread.
+    Local {
+        publication: NetworkPublication,
+        endpoint_idx: usize,
+        dest_addr: Option<libc::sockaddr_storage>,
+        needs_setup: bool,
+        time_of_last_send_ns: i64,
+        time_of_last_setup_ns: i64,
+    },
+    /// Cross-thread publication - sender side only (publisher handle given
+    /// to the application thread).
+    Concurrent {
+        sender_pub: SenderPublication,
+        endpoint_idx: usize,
+        dest_addr: Option<libc::sockaddr_storage>,
+        needs_setup: bool,
+        time_of_last_send_ns: i64,
+        time_of_last_setup_ns: i64,
+    },
+}
+
+impl PublicationEntry {
+    #[inline]
+    fn endpoint_idx(&self) -> usize {
+        match self {
+            PublicationEntry::Local { endpoint_idx, .. } => *endpoint_idx,
+            PublicationEntry::Concurrent { endpoint_idx, .. } => *endpoint_idx,
+        }
+    }
+
+    #[inline]
+    fn session_id(&self) -> i32 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.session_id(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.session_id(),
+        }
+    }
+
+    #[inline]
+    fn stream_id(&self) -> i32 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.stream_id(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.stream_id(),
+        }
+    }
+
+    #[inline]
+    fn initial_term_id(&self) -> i32 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.initial_term_id(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.initial_term_id(),
+        }
+    }
+
+    #[inline]
+    fn active_term_id(&self) -> i32 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.active_term_id(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.active_term_id_approx(),
+        }
+    }
+
+    #[inline]
+    fn term_offset(&self) -> u32 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.term_offset(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.term_offset_approx(),
+        }
+    }
+
+    #[inline]
+    fn term_length(&self) -> u32 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.term_length(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.term_length(),
+        }
+    }
+
+    #[inline]
+    fn mtu(&self) -> u32 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.mtu(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.mtu(),
+        }
+    }
+
+    #[inline]
+    fn needs_setup(&self) -> bool {
+        match self {
+            PublicationEntry::Local { needs_setup, .. } => *needs_setup,
+            PublicationEntry::Concurrent { needs_setup, .. } => *needs_setup,
+        }
+    }
+
+    #[inline]
+    fn set_needs_setup(&mut self, val: bool) {
+        match self {
+            PublicationEntry::Local { needs_setup, .. } => *needs_setup = val,
+            PublicationEntry::Concurrent { needs_setup, .. } => *needs_setup = val,
+        }
+    }
+
+    #[inline]
+    fn time_of_last_send_ns(&self) -> i64 {
+        match self {
+            PublicationEntry::Local { time_of_last_send_ns, .. } => *time_of_last_send_ns,
+            PublicationEntry::Concurrent { time_of_last_send_ns, .. } => *time_of_last_send_ns,
+        }
+    }
+
+    #[inline]
+    fn set_time_of_last_send_ns(&mut self, val: i64) {
+        match self {
+            PublicationEntry::Local { time_of_last_send_ns, .. } => *time_of_last_send_ns = val,
+            PublicationEntry::Concurrent { time_of_last_send_ns, .. } => *time_of_last_send_ns = val,
+        }
+    }
+
+    #[inline]
+    fn time_of_last_setup_ns(&self) -> i64 {
+        match self {
+            PublicationEntry::Local { time_of_last_setup_ns, .. } => *time_of_last_setup_ns,
+            PublicationEntry::Concurrent { time_of_last_setup_ns, .. } => *time_of_last_setup_ns,
+        }
+    }
+
+    #[inline]
+    fn set_time_of_last_setup_ns(&mut self, val: i64) {
+        match self {
+            PublicationEntry::Local { time_of_last_setup_ns, .. } => *time_of_last_setup_ns = val,
+            PublicationEntry::Concurrent { time_of_last_setup_ns, .. } => *time_of_last_setup_ns = val,
+        }
+    }
+
+
+    /// Perform sender_scan via enum dispatch (no dyn - monomorphized paths).
+    #[inline]
+    fn sender_scan<F>(&mut self, limit: u32, emit: F) -> u32
+    where
+        F: FnMut(u32, &[u8]),
+    {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.sender_scan(limit, emit),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.sender_scan(limit, emit),
+        }
+    }
 }
 
 /// Maximum expected endpoints / publications. Pre-sized to avoid
@@ -71,28 +211,71 @@ impl SenderAgent {
     }
 
     /// Add a publication to be serviced by the sender agent.
+    ///
+    /// Returns `Some(pub_idx)` on success, `None` if `NetworkPublication::new`
+    /// fails (e.g. invalid term_length or mtu).
     pub fn add_publication(
         &mut self,
         endpoint_idx: usize,
         session_id: i32,
         stream_id: i32,
         initial_term_id: i32,
-        term_length: i32,
-        mtu: i32,
-    ) {
-        self.publications.push(PublicationEntry {
-            session_id,
-            stream_id,
-            term_id: initial_term_id,
-            term_offset: 0,
-            term_length,
-            mtu,
+        term_length: u32,
+        mtu: u32,
+    ) -> Option<usize> {
+        let publication =
+            NetworkPublication::new(session_id, stream_id, initial_term_id, term_length, mtu)?;
+        let idx = self.publications.len();
+        self.publications.push(PublicationEntry::Local {
+            publication,
             endpoint_idx,
             dest_addr: None,
             needs_setup: true,
             time_of_last_send_ns: 0,
             time_of_last_setup_ns: 0,
         });
+        Some(idx)
+    }
+
+    /// Add a concurrent (cross-thread) publication.
+    ///
+    /// Creates a `ConcurrentPublication` + `SenderPublication` pair.
+    /// Stores the `SenderPublication` internally for sender_scan.
+    /// Returns the `ConcurrentPublication` handle to be moved to the
+    /// application thread for calling `offer()`.
+    ///
+    /// Returns `None` if parameters are invalid.
+    pub fn add_concurrent_publication(
+        &mut self,
+        endpoint_idx: usize,
+        session_id: i32,
+        stream_id: i32,
+        initial_term_id: i32,
+        term_length: u32,
+        mtu: u32,
+    ) -> Option<ConcurrentPublication> {
+        let (pub_handle, sender_view) =
+            new_concurrent(session_id, stream_id, initial_term_id, term_length, mtu)?;
+        self.publications.push(PublicationEntry::Concurrent {
+            sender_pub: sender_view,
+            endpoint_idx,
+            dest_addr: None,
+            needs_setup: true,
+            time_of_last_send_ns: 0,
+            time_of_last_setup_ns: 0,
+        });
+        Some(pub_handle)
+    }
+
+    /// Get mutable access to a local publication for calling `offer()`.
+    ///
+    /// Returns `None` if the index is out of bounds or points to a
+    /// concurrent publication (use the `ConcurrentPublication` handle instead).
+    pub fn publication_mut(&mut self, idx: usize) -> Option<&mut NetworkPublication> {
+        match self.publications.get_mut(idx)? {
+            PublicationEntry::Local { publication, .. } => Some(publication),
+            PublicationEntry::Concurrent { .. } => None,
+        }
     }
 
     // ── Internal duty-cycle steps ──
@@ -109,59 +292,88 @@ impl SenderAgent {
         let start = self.round_robin_index;
         self.round_robin_index = start.wrapping_add(1);
 
-        let total_bytes = 0i32;
+        let mut total_bytes = 0i32;
+
+        // Destructure self into disjoint field borrows. Rust allows
+        // simultaneous &mut to different struct fields when accessed directly
+        // (not through &mut self). This lets us hold &mut publication +
+        // &endpoints + &mut poller simultaneously in the scan+send closure.
+        let publications = &mut self.publications;
+        let endpoints = &mut self.endpoints;
+        let poller = &mut self.poller;
+        let heartbeat_interval_ns = self.heartbeat_interval_ns;
 
         let mut idx = start;
         for _ in 0..len {
-            let pub_entry = &self.publications[idx];
-            let ep_idx = pub_entry.endpoint_idx;
-            let session_id = pub_entry.session_id;
-            let stream_id = pub_entry.stream_id;
-            let term_id = pub_entry.term_id;
-            let term_offset = pub_entry.term_offset;
-            let term_length = pub_entry.term_length;
-            let mtu = pub_entry.mtu;
-            let needs_setup = pub_entry.needs_setup;
-            let last_setup_ns = pub_entry.time_of_last_setup_ns;
-            let last_send_ns = pub_entry.time_of_last_send_ns;
-            let dest_addr = pub_entry.dest_addr;
+            // Phase 1: Copy scalars from publication entry via enum dispatch.
+            // All values are Copy - no allocation.
+            let ep_idx = publications[idx].endpoint_idx();
+            let session_id = publications[idx].session_id();
+            let stream_id = publications[idx].stream_id();
+            let initial_term_id = publications[idx].initial_term_id();
+            let active_term_id = publications[idx].active_term_id();
+            let term_offset = publications[idx].term_offset();
+            let term_length = publications[idx].term_length();
+            let mtu_val = publications[idx].mtu();
+            let needs_setup = publications[idx].needs_setup();
+            let last_setup_ns = publications[idx].time_of_last_setup_ns();
+            let last_send_ns = publications[idx].time_of_last_send_ns();
+            let dest_addr_copy: Option<libc::sockaddr_storage> = match &publications[idx] {
+                PublicationEntry::Local { dest_addr, .. } => *dest_addr,
+                PublicationEntry::Concurrent { dest_addr, .. } => *dest_addr,
+            };
 
-            // Send setup if needed.
+            // Phase 2: Send setup if needed (needs &mut endpoint + &mut poller).
             if needs_setup
-                && (now_ns.wrapping_sub(last_setup_ns) > self.heartbeat_interval_ns)
+                && (now_ns.wrapping_sub(last_setup_ns) > heartbeat_interval_ns)
             {
-                let ep = &mut self.endpoints[ep_idx];
+                let ep = &mut endpoints[ep_idx];
                 let _ = ep.send_setup(
-                    &mut self.poller,
+                    poller,
                     session_id,
                     stream_id,
-                    term_id,
-                    term_id,
-                    term_offset,
-                    term_length,
-                    mtu,
+                    initial_term_id,
+                    active_term_id,
+                    term_offset as i32,
+                    term_length as i32,
+                    mtu_val as i32,
                     0, // ttl
-                    dest_addr.as_ref(),
+                    dest_addr_copy.as_ref(),
                 );
-                self.publications[idx].time_of_last_setup_ns = now_ns;
+                publications[idx].set_time_of_last_setup_ns(now_ns);
             }
 
-            // Send heartbeat if idle.
-            if now_ns.wrapping_sub(last_send_ns) > self.heartbeat_interval_ns {
-                let ep = &mut self.endpoints[ep_idx];
+            // Send heartbeat if idle (needs &mut endpoint + &mut poller).
+            if now_ns.wrapping_sub(last_send_ns) > heartbeat_interval_ns {
+                let ep = &mut endpoints[ep_idx];
                 let _ = ep.send_heartbeat(
-                    &mut self.poller,
+                    poller,
                     session_id,
                     stream_id,
-                    term_id,
-                    term_offset,
-                    dest_addr.as_ref(),
+                    active_term_id,
+                    term_offset as i32,
+                    dest_addr_copy.as_ref(),
                 );
-                self.publications[idx].time_of_last_send_ns = now_ns;
+                publications[idx].set_time_of_last_send_ns(now_ns);
             }
 
-            // TODO: scan term buffer for pending data frames and submit via
-            // endpoint.send_data(). This is the phase 3 integration point.
+            // Phase 3: Scan committed frames and send via endpoint.
+            // Uses enum dispatch for sender_scan (no dyn).
+            {
+                let dest = dest_addr_copy.as_ref();
+                let pub_entry = &mut publications[idx];
+                let ep = &endpoints[ep_idx];
+                let limit = pub_entry.mtu();
+
+                let scanned = pub_entry.sender_scan(limit, |_off, data| {
+                    let _ = ep.send_data(poller, data, dest);
+                });
+
+                if scanned > 0 {
+                    pub_entry.set_time_of_last_send_ns(now_ns);
+                }
+                total_bytes = total_bytes.wrapping_add(scanned as i32);
+            }
 
             // Advance round-robin index (branch-based wrap, no modulo).
             idx += 1;
@@ -170,7 +382,7 @@ impl SenderAgent {
             }
         }
 
-        let _ = self.poller.flush();
+        let _ = poller.flush();
         total_bytes
     }
 
@@ -198,10 +410,10 @@ impl SenderAgent {
             ep.drain_sm(|sm| {
                 // Find matching publication and update sender position.
                 for pub_entry in &mut self.publications {
-                    if pub_entry.session_id == sm.session_id
-                        && pub_entry.stream_id == sm.stream_id
+                    if pub_entry.session_id() == sm.session_id
+                        && pub_entry.stream_id() == sm.stream_id
                     {
-                        pub_entry.needs_setup = false;
+                        pub_entry.set_needs_setup(false);
                         // Update flow control state (phase 3).
                     }
                 }
