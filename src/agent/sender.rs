@@ -1,4 +1,4 @@
-// The Sender Agent — owns the send-side io_uring poller and all
+// The Sender Agent - owns the send-side io_uring poller and all
 // SendChannelEndpoints. Mirrors aeron_driver_sender_t.
 
 use super::{Agent, AgentError};

@@ -1,4 +1,4 @@
-// Aeron wire protocol frames — zero-copy parsing from byte slices.
+// Aeron wire protocol frames - zero-copy parsing from byte slices.
 // Mirrors the C structs in aeron_protocol.h.
 //
 // All `parse()` methods use `repr(C, packed)` overlay for zero-copy access.

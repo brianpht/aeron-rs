@@ -10,7 +10,7 @@ pub enum AgentError {
 
 /// Single-threaded agent duty-cycle interface.
 ///
-/// Mirrors `aeron_agent_t` — called in a tight loop by the agent runner.
+/// Mirrors `aeron_agent_t` - called in a tight loop by the agent runner.
 /// Implementations must be zero-allocation in steady state.
 pub trait Agent {
     /// Human-readable name for logging / diagnostics.

@@ -9,7 +9,7 @@ use super::transport::UdpChannelTransport;
 
 /// Stack-only error for hot-path poller operations.
 ///
-/// Unlike `std::io::Error`, this **never heap-allocates** — safe for use in
+/// Unlike `std::io::Error`, this **never heap-allocates** - safe for use in
 /// the agent duty cycle. `Copy` + `Clone` so it can be returned by value
 /// through the entire send/recv pipeline without boxing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

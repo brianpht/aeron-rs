@@ -23,7 +23,7 @@ pub struct RecvSlot {
     pub state: SlotState,
 }
 
-/// Send slot — smaller, no large buffer (points to external data).
+/// Send slot - smaller, no large buffer (points to external data).
 #[repr(C, align(64))]
 pub struct SendSlot {
     pub hdr: libc::msghdr,
@@ -392,7 +392,7 @@ mod tests {
     fn free_recv_overflow_panics_in_debug() {
         // SlotPool with 1 recv slot. After new(), free list = [0], capacity = 1.
         let mut pool = SlotPool::new(1, 0);
-        // Don't alloc — free list is already full (len=1, cap=1).
+        // Don't alloc - free list is already full (len=1, cap=1).
         // Manually set slot 0 to Free (it already is) and call free_recv.
         // This pushes beyond capacity → should panic on the capacity debug_assert.
         pool.free_recv(0);

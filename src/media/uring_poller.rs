@@ -1,4 +1,4 @@
-// io_uring–based transport poller. Single-threaded, no async/await.
+// io_uring-based transport poller. Single-threaded, no async/await.
 // Designed for Aeron's synchronous agent duty-cycle model.
 //
 // Uses multishot RecvMsgMulti with io_uring provided buffer ring (buf_ring)
@@ -68,7 +68,7 @@ struct BufRingPool {
 impl BufRingPool {
     /// Create and register a provided buffer ring.
     ///
-    /// `entries` must be power-of-two ≤ 32768.
+    /// `entries` must be power-of-two <= 32768.
     /// Allocates `entries` buffers of `buf_size` bytes each.
     fn new(
         submitter: &io_uring::Submitter<'_>,
@@ -216,9 +216,9 @@ impl Drop for BufRingPool {
 /// Packed into the 64-bit CQE user_data field.
 ///
 /// Layout:
-///   [63..48] transport_idx  (16 bits — max 65535 transports)
+///   [63..48] transport_idx  (16 bits - max 65535 transports)
 ///   [47..40] op_kind        (8 bits)
-///   [39..24] slot_idx       (16 bits — send slots only; 0 for multishot recv)
+///   [39..24] slot_idx       (16 bits - send slots only; 0 for multishot recv)
 ///   [23..0]  reserved       (24 bits)
 #[derive(Clone, Copy)]
 struct UserData(u64);
@@ -297,7 +297,7 @@ impl UringTransportPoller {
         // Send-only slot pool (recv handled by buf_ring multishot).
         let pool = SlotPool::new(0, ctx.uring_send_slots);
 
-        // Template msghdr for multishot RecvMsg — kernel reads msg_namelen
+        // Template msghdr for multishot RecvMsg - kernel reads msg_namelen
         // and msg_controllen to know how much name/control to capture.
         let mut recv_msghdr: libc::msghdr = unsafe { mem::zeroed() };
         recv_msghdr.msg_namelen =
@@ -469,10 +469,10 @@ impl TransportPoller for UringTransportPoller {
         let mut bufs_returned = false;
 
         {
-            // SAFETY: single-threaded agent — no concurrent access to ring.
+            // SAFETY: single-threaded agent - no concurrent access to ring.
             let cq = unsafe { self.ring.completion_shared() };
 
-            // Detect CQ overflow — kernel dropped CQEs because the CQ ring
+            // Detect CQ overflow - kernel dropped CQEs because the CQ ring
             // was full. This means we lost send completion notifications and
             // potentially multishot terminations.
             let overflow = cq.overflow();
@@ -480,7 +480,7 @@ impl TransportPoller for UringTransportPoller {
                 result.cq_overflows = overflow;
                 tracing::warn!(
                     overflow,
-                    "io_uring CQ overflow — {} CQEs lost, recovering send slots",
+                    "io_uring CQ overflow - {} CQEs lost, recovering send slots",
                     overflow
                 );
             }
@@ -560,7 +560,7 @@ impl TransportPoller for UringTransportPoller {
                                     Err(()) => None,
                                 }
                             };
-                            // buf borrow released — scope ended.
+                            // buf borrow released - scope ended.
 
                             if let Some(b) = bytes {
                                 result.bytes_received += b;
@@ -630,13 +630,13 @@ impl TransportPoller for UringTransportPoller {
 
         // CQ overflow recovery: scan send slots for leaked in-flight entries.
         // The kernel dropped their completion CQEs so we never freed them.
-        // This is a cold path — only runs when overflow is detected.
+        // This is a cold path - only runs when overflow is detected.
         if result.cq_overflows > 0 {
             self.recover_leaked_send_slots();
         }
 
         // Submit only if we pushed re-arm SQEs (multishot restart).
-        // On normal cycles, the multishot stays active — no SQE push,
+        // On normal cycles, the multishot stays active - no SQE push,
         // no io_uring_enter syscall.
         if needs_submit {
             self.ring.submit().map_err(PollError::from)?;

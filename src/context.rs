@@ -9,7 +9,7 @@ pub enum ContextValidationError {
     RingSizeNotPowerOfTwo,
     /// `uring_buf_ring_entries` must be a power of two.
     BufRingEntriesNotPowerOfTwo,
-    /// `uring_buf_ring_entries` must be ≤ 32768.
+    /// `uring_buf_ring_entries` must be <= 32768.
     BufRingEntriesTooLarge,
     /// `uring_buf_ring_entries` must be > 0.
     BufRingEntriesZero,
@@ -254,7 +254,7 @@ mod tests {
         let mut ctx = DriverContext::default();
         ctx.uring_buf_ring_entries = 65535; // not power-of-two
         assert!(ctx.validate().is_err());
-        // 32768 is the max valid value (power-of-two, ≤ 32768).
+        // 32768 is the max valid value (power-of-two, <= 32768).
         ctx.uring_buf_ring_entries = 32768;
         assert!(ctx.validate().is_ok());
     }

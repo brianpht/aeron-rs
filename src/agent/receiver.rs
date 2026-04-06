@@ -1,4 +1,4 @@
-// The Receiver Agent — owns the receive-side io_uring poller and all
+// The Receiver Agent - owns the receive-side io_uring poller and all
 // ReceiveChannelEndpoints. Mirrors aeron_driver_receiver_t.
 
 use super::{Agent, AgentError};
@@ -18,7 +18,7 @@ const MAX_IMAGES: usize = 256;
 const IMAGE_INDEX_MASK: usize = MAX_IMAGES - 1;
 /// Sentinel value meaning "empty slot" in the image hash index.
 const IMAGE_INDEX_EMPTY: u16 = u16::MAX;
-/// Maximum expected endpoints — pre-sized to avoid reallocation.
+/// Maximum expected endpoints - pre-sized to avoid reallocation.
 const MAX_RECV_ENDPOINTS: usize = 16;
 
 // ── O(1) image lookup helpers (no allocation, no modulo) ──

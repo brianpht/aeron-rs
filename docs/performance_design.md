@@ -2,7 +2,7 @@
 
 > **Zero-copy, io_uring-native Aeron media driver in Rust.**
 >
-> ⚠️ If a change triggers allocation in steady state, moves a pinned buffer, or adds a syscall in the duty cycle → *
+> [!] If a change triggers allocation in steady state, moves a pinned buffer, or adds a syscall in the duty cycle - *
 *REJECT**.
 
 ---
@@ -51,7 +51,7 @@
 | Aeron (Real Logic)   | Wire protocol, agent model, term buffer design |
 | io_uring             | Syscall-free I/O, provided buffer rings        |
 | Mechanical Sympathy  | Hardware-aware, cache-local data structures    |
-| Aeron C media driver | Reference latency floor (~40–80 ns offer path) |
+| Aeron C media driver | Reference latency floor (~40-80 ns offer path) |
 
 ---
 
@@ -76,18 +76,18 @@ Benchmarks are the final authority.
 ### Auto-Reject Rules (Enforced)
 
 ```
-❌ Mutex / RwLock in agent duty cycle
-❌ HashMap in hot path → use pre-sized flat array + index
-❌ % (modulo) for ring / term index → use & (capacity - 1)
-❌ unwrap() / expect() in parsing or CQE handling
-❌ Trait object (dyn) in duty cycle → monomorphize or enum dispatch
-❌ Allocation (Vec::push growth, Box, String, format!) inside duty cycle
-❌ Sequence comparison using > or < → use wrapping_sub + half-range
-❌ Vec resize / realloc while io_uring slots are in-flight
-❌ Pointer cast for wire format parsing → use from_le_bytes or repr(C, packed)
-❌ Host-endian assumption in protocol frames
-❌ SeqCst atomic ordering in hot path
-❌ std::io::Error construction in hot path (heap-allocates)
+[x] Mutex / RwLock in agent duty cycle
+[x] HashMap in hot path - use pre-sized flat array + index
+[x] % (modulo) for ring / term index - use & (capacity - 1)
+[x] unwrap() / expect() in parsing or CQE handling
+[x] Trait object (dyn) in duty cycle - monomorphize or enum dispatch
+[x] Allocation (Vec::push growth, Box, String, format!) inside duty cycle
+[x] Sequence comparison using > or < - use wrapping_sub + half-range
+[x] Vec resize / realloc while io_uring slots are in-flight
+[x] Pointer cast for wire format parsing - use from_le_bytes or repr(C, packed)
+[x] Host-endian assumption in protocol frames
+[x] SeqCst atomic ordering in hot path
+[x] std::io::Error construction in hot path (heap-allocates)
 ```
 
 ---
@@ -96,14 +96,14 @@ Benchmarks are the final authority.
 
 | Assumption           | Value                                               |
 |----------------------|-----------------------------------------------------|
-| Primary target       | x86_64 Linux (kernel ≥ 5.19 for buf_ring)           |
+| Primary target       | x86_64 Linux (kernel >= 5.19 for buf_ring)          |
 | Wire format          | **Little-endian (Aeron protocol)**                  |
 | I/O model            | **io_uring** (no epoll/select fallback in hot path) |
-| Thread model         | One thread per agent — no shared mutable state      |
+| Thread model         | One thread per agent - no shared mutable state      |
 | Cluster architecture | Same-architecture expected                          |
 | Priority             | Deterministic latency > cross-platform portability  |
 
-> ⚠️ **Note**: Big-endian targets are rejected at compile time (`compile_error!` in `frame.rs`). Cross-endian support
+> [!] **Note**: Big-endian targets are rejected at compile time (`compile_error!` in `frame.rs`). Cross-endian support
 > would require a versioned protocol change.
 
 ---
@@ -114,42 +114,42 @@ Benchmarks are the final authority.
 
 | Metric                       | Target   | Measured | Status |
 |------------------------------|----------|----------|--------|
-| FrameHeader::parse           | < 5 ns   | ~0.3 ns  | ✅      |
-| DataHeader::parse            | < 5 ns   | ~0.4 ns  | ✅      |
-| classify_frame               | < 5 ns   | ~0.5 ns  | ✅      |
-| SlotPool alloc + free        | < 10 ns  | ~3.0 ns  | ✅      |
-| SQE push (alloc + prepare)   | < 10 ns  | ~3.8 ns  | ✅      |
-| Heartbeat build + submit     | < 15 ns  | ~4.5 ns  | ✅      |
-| CQE dispatch (single msg)    | < 50 ns  | ~13.7 ns | ✅      |
-| NAK build + write            | < 10 ns  | ~1.5 ns  | ✅      |
-| Loss scan (16 frames, 1 gap) | < 200 ns | ~0.7 ns  | ✅      |
-| Gap detection (wrapping sub) | < 5 ns   | ~0.4 ns  | ✅      |
-| CachedNanoClock::cached      | < 1 ns   | ~0.2 ns  | ✅      |
+| FrameHeader::parse           | < 5 ns   | ~0.3 ns  | PASS   |
+| DataHeader::parse            | < 5 ns   | ~0.4 ns  | PASS   |
+| classify_frame               | < 5 ns   | ~0.5 ns  | PASS   |
+| SlotPool alloc + free        | < 10 ns  | ~3.0 ns  | PASS   |
+| SQE push (alloc + prepare)   | < 10 ns  | ~3.8 ns  | PASS   |
+| Heartbeat build + submit     | < 15 ns  | ~4.5 ns  | PASS   |
+| CQE dispatch (single msg)    | < 50 ns  | ~13.7 ns | PASS   |
+| NAK build + write            | < 10 ns  | ~1.5 ns  | PASS   |
+| Loss scan (16 frames, 1 gap) | < 200 ns | ~0.7 ns  | PASS   |
+| Gap detection (wrapping sub) | < 5 ns   | ~0.4 ns  | PASS   |
+| CachedNanoClock::cached      | < 1 ns   | ~0.2 ns  | PASS   |
 
 ### io_uring Kernel Roundtrip
 
 | Metric                        | Target   | Measured | Status |
 |-------------------------------|----------|----------|--------|
-| NOP submit + reap (single)    | < 500 ns | ~163 ns  | ✅      |
-| NOP submit + reap (burst 16)  | < 1 µs   | ~371 ns  | ✅      |
-| UDP sendmsg + reap            | < 2 µs   | ~874 ns  | ✅      |
-| Multishot recv reap + recycle | < 50 ns  | ~14.8 ns | ✅      |
-| submit() empty ring (syscall) | < 200 ns | ~65.1 ns | ✅      |
-| SQE push only (no submit)     | < 50 ns  | ~31.4 ns | ✅      |
+| NOP submit + reap (single)    | < 500 ns | ~163 ns  | PASS   |
+| NOP submit + reap (burst 16)  | < 1 us   | ~371 ns  | PASS   |
+| UDP sendmsg + reap            | < 2 us   | ~874 ns  | PASS   |
+| Multishot recv reap + recycle | < 50 ns  | ~14.8 ns | PASS   |
+| submit() empty ring (syscall) | < 200 ns | ~65.1 ns | PASS   |
+| SQE push only (no submit)     | < 50 ns  | ~31.4 ns | PASS   |
 
 ### System-Level
 
 | Metric                    | Target                      | Status |
 |---------------------------|-----------------------------|--------|
-| Throughput (1408B frames) | ≥ 3 M msg/s                 | ✅      |
-| Steady-state allocation   | **Zero**                    | ✅      |
-| Syscalls per duty cycle   | 0–1 (`io_uring_enter` only) | ✅      |
+| Throughput (1408B frames) | >= 3 M msg/s                | PASS   |
+| Steady-state allocation   | **Zero**                    | PASS   |
+| Syscalls per duty cycle   | 0-1 (`io_uring_enter` only) | PASS   |
 
 ### Regression Policy
 
-- **> 10% regression** → requires justification and benchmark comparison
+- **> 10% regression** - requires justification and benchmark comparison
 - **Tail latency** matters more than average latency
-- `p99 > p50 × 2` → investigate
+- `p99 > p50 x 2` - investigate
 
 ---
 
@@ -161,18 +161,18 @@ Benchmarks are the final authority.
 Correctness > Determinism > Latency > Throughput
 ```
 
-> ⚠️ **Unbounded memory or nondeterministic latency is a correctness failure.**
+> [!] **Unbounded memory or nondeterministic latency is a correctness failure.**
 
 #### Must Be Deterministic Under
 
 | Condition            | Required |
 |----------------------|----------|
-| Packet loss          | ✅        |
-| Reordering           | ✅        |
-| Duplication          | ✅        |
-| Sequence / term wrap | ✅        |
-| io_uring CQE reorder | ✅        |
-| Buffer exhaustion    | ✅        |
+| Packet loss          | Yes      |
+| Reordering           | Yes      |
+| Duplication          | Yes      |
+| Sequence / term wrap | Yes      |
+| io_uring CQE reorder | Yes      |
+| Buffer exhaustion    | Yes      |
 
 **No randomness in protocol logic. No unbounded retries.**
 
@@ -180,7 +180,7 @@ Correctness > Determinism > Latency > Throughput
 
 ### 2. Zero-Copy I/O via io_uring
 
-The entire I/O path uses io_uring — no `epoll`, no `select`, no `recvmsg` syscall in the duty cycle.
+The entire I/O path uses io_uring - no `epoll`, no `select`, no `recvmsg` syscall in the duty cycle.
 
 ```
 ┌─────────────┐  SQE   ┌─────────────────────┐  io_uring_enter  ┌────────┐
@@ -194,7 +194,7 @@ The entire I/O path uses io_uring — no `epoll`, no `select`, no `recvmsg` sysc
 |-------------------------------------|--------------------------------------------------|
 | One `io_uring_enter` per flush      | Amortises syscall across all pending SQEs        |
 | Multishot RecvMsgMulti stays active | No SQE re-arm per received packet                |
-| Provided buffer ring (buf_ring)     | Kernel picks buffers from shared ring — no copy  |
+| Provided buffer ring (buf_ring)     | Kernel picks buffers from shared ring - no copy  |
 | SendMsg via slot pool               | Pre-allocated msghdr + iov, kernel copies to skb |
 | CQE batch harvest to stack buffer   | Breaks borrow on ring; cache-local iteration     |
 
@@ -215,17 +215,17 @@ The entire I/O path uses io_uring — no `epoll`, no `select`, no `recvmsg` sysc
 
 | Operation              | Allocation Allowed? |
 |------------------------|---------------------|
-| `Agent::do_work`       | ❌                   |
-| `poll_recv` (CQE reap) | ❌                   |
-| `submit_send`          | ❌                   |
-| Frame parse / classify | ❌                   |
-| SM / NAK generation    | ❌                   |
-| Loss detection         | ❌                   |
-| Heartbeat / setup send | ❌                   |
+| `Agent::do_work`       | NO                  |
+| `poll_recv` (CQE reap) | NO                  |
+| `submit_send`          | NO                  |
+| Frame parse / classify | NO                  |
+| SM / NAK generation    | NO                  |
+| Loss detection         | NO                  |
+| Heartbeat / setup send | NO                  |
 
 - All buffers **pre-allocated at initialization** (`SlotPool::new`, `BufRingPool::new`)
 - Scratch buffers for control frames live **inline in the endpoint struct** (`heartbeat_buf`, `sm_buf`, `nak_buf`)
-- Pending SM / NAK queues are **pre-sized flat arrays** with length counter — no Vec growth
+- Pending SM / NAK queues are **pre-sized flat arrays** with length counter - no Vec growth
 - Image lookup uses **fixed-size hash table** with linear probing and bitmask
 - **Reuse everything**
 
@@ -254,7 +254,7 @@ The entire I/O path uses io_uring — no `epoll`, no `select`, no `recvmsg` sysc
 | One thread per agent                         | No locks, no atomic CAS in duty cycle     |
 | No shared mutable state between agents       | Eliminates all synchronization overhead   |
 | `Agent::do_work()` called in tight spin loop | Bounded, deterministic work per iteration |
-| `CachedNanoClock` → one clock read per cycle | Avoids repeated `clock_gettime` syscalls  |
+| `CachedNanoClock` - one clock read per cycle | Avoids repeated `clock_gettime` syscalls  |
 
 #### Duty Cycle Structure
 
@@ -286,14 +286,14 @@ ReceiverAgent::do_work(now_ns):
 
 | Rule                           | Implementation                                             |
 |--------------------------------|------------------------------------------------------------|
-| Contiguous memory for hot data | `Vec<SendSlot>`, `Vec<RecvSlot>` — linear in memory        |
+| Contiguous memory for hot data | `Vec<SendSlot>`, `Vec<RecvSlot>` - linear in memory        |
 | Cache-line aligned slots       | `#[repr(C, align(64))]` on `RecvSlot`, `SendSlot`          |
-| CQE batch to stack buffer      | `[MaybeUninit<(u64,i32,u32)>; 256]` — 4 KiB, L1-resident   |
+| CQE batch to stack buffer      | `[MaybeUninit<(u64,i32,u32)>; 256]` - 4 KiB, L1-resident   |
 | Avoid pointer chasing          | Flat arrays + index, not `HashMap` / `BTreeMap`            |
 | Power-of-two ring buffers      | Bitmask indexing, never modulo                             |
 | Hot/cold separation            | Wire fields in `repr(C, packed)` struct, metadata separate |
-| Pre-sized pending queues       | `[PendingSm; 64]` inline in endpoint — no heap indirection |
-| Image hash table               | `[u16; 256]` with bitmask probing — no `HashMap`           |
+| Pre-sized pending queues       | `[PendingSm; 64]` inline in endpoint - no heap indirection |
+| Image hash table               | `[u16; 256]` with bitmask probing - no `HashMap`           |
 
 ---
 
@@ -308,7 +308,7 @@ alloc_send()          prepare_send()           CQE reaped              free_send
 │ Free │────────────▶│ Owned    │────────────▶│ InFlight │──────────▶ │ Free │
 └──────┘             └──────────┘             └──────────┘            └──────┘
 
-⚠️ WHILE InFlight:
+[!] WHILE InFlight:
 - DO NOT move the slot (Vec must not reallocate)
 - DO NOT modify hdr / iov / addr / buffer
 - DO NOT free the slot
@@ -324,7 +324,7 @@ alloc_send()          prepare_send()           CQE reaped              free_send
 | Never hold `&mut Slot` while InFlight       | Required |
 | Never assume CQE order matches SQE order    | Required |
 
-#### `RecvSlot` — Stable Pointer Initialization
+#### `RecvSlot` - Stable Pointer Initialization
 
 ```rust
 // Called once after Vec is fully constructed (never resized after)
@@ -338,7 +338,7 @@ unsafe fn init_stable_pointers(&mut self) {
 }
 ```
 
-#### `SendSlot` — Per-Send Setup
+#### `SendSlot` - Per-Send Setup
 
 ```rust
 // Called each time a send is prepared (points to external data)
@@ -399,19 +399,19 @@ Aeron uses 32-bit signed term IDs and offsets that wrap. Naive comparison breaks
 | Test all wrap-around cases       | Required      |
 
 ```rust
-// ✅ CORRECT — wrapping comparison with half-range check
+// [PASS] CORRECT - wrapping comparison with half-range check
 fn is_past(proposed: i32, current: i32) -> bool {
     let diff = proposed.wrapping_sub(current);
     diff > 0 && diff < (i32::MAX / 2)
 }
 
-// ✅ CORRECT — gap detection in receiver image
+// [PASS] CORRECT - gap detection in receiver image
 let gap = received_offset.wrapping_sub(expected_offset);
 if gap > 0 & & gap < (i32::MAX / 2) {
-// gap detected → schedule NAK
+// gap detected - schedule NAK
 }
 
-// ❌ FORBIDDEN
+// [FAIL] FORBIDDEN
 if term_id_a > term_id_b { ... }      // wraps at i32::MAX
 let diff = term_id_a - term_id_b;     // panics on overflow in debug
 ```
@@ -427,12 +427,12 @@ let diff = term_id_a - term_id_b;     // panics on overflow in debug
 #### Indexing
 
 ```rust
-// ✅ Correct — bitmask
+// [PASS] Correct - bitmask
 let index = offset & (capacity - 1);
 let slot  = (hash.wrapping_add(probe)) & IMAGE_INDEX_MASK;
 let tail  = local_tail & mask;
 
-// ❌ Forbidden
+// [FAIL] Forbidden
 let index = offset % capacity;
 ```
 
@@ -446,13 +446,13 @@ let index = offset % capacity;
 #### Round-Robin Without Modulo
 
 ```rust
-// ✅ CORRECT — branch-based wrap
+// [PASS] CORRECT - branch-based wrap
 idx += 1;
 if idx > = len {
 idx = 0;
 }
 
-// ❌ FORBIDDEN
+// [FAIL] FORBIDDEN
 idx = (idx + 1) % len;
 ```
 
@@ -526,7 +526,7 @@ pub enum PollError {
     RingFull,
     NoSendSlot,
     NotRegistered,
-    Os(i32),   // raw errno — no String, no Box
+    Os(i32),   // raw errno - no String, no Box
 }
 ```
 
@@ -546,11 +546,11 @@ pub enum PollError {
 All poller dispatch is monomorphized via generic type parameter:
 
 ```rust
-// ✅ Monomorphized — zero-cost dispatch
+// [PASS] Monomorphized - zero-cost dispatch
 pub fn send_heartbeat<P: TransportPoller>(&mut self, poller: &mut P, ...) { ... }
 pub fn send_pending<P: TransportPoller>(&mut self, poller: &mut P, ...) { ... }
 
-// ❌ FORBIDDEN
+// [FAIL] FORBIDDEN
 pub fn send_heartbeat(&mut self, poller: &mut dyn TransportPoller, ...) { ... }
 ```
 
@@ -590,12 +590,12 @@ The driver uses `unsafe` in three controlled categories:
 
 | Condition                | Required |
 |--------------------------|----------|
-| Measurable gain proven   | ✅        |
-| Benchmarked before/after | ✅        |
-| Invariants documented    | ✅        |
-| Safety comment at site   | ✅        |
+| Measurable gain proven   | Yes      |
+| Benchmarked before/after | Yes      |
+| Invariants documented    | Yes      |
+| Safety comment at site   | Yes      |
 
-> ❌ **Unsafe without documented safety invariant → reject.**
+> [FAIL] **Unsafe without documented safety invariant - reject.**
 
 ---
 
@@ -610,7 +610,7 @@ The driver uses `unsafe` in three controlled categories:
 | prepare_send            | < 5 ns      | (included in SQE push) |
 | SQE push                | < 10 ns     | ~3.8 ns                |
 | **Total userspace**     | **< 25 ns** | **~8.3 ns**            |
-| io_uring_enter + kernel | < 1 µs      | ~874 ns                |
+| io_uring_enter + kernel | < 1 us      | ~874 ns                |
 
 #### Per-Message Receive Path (Multishot)
 
@@ -633,17 +633,17 @@ The driver uses `unsafe` in three controlled categories:
 
 | Phase          | Heap allocation allowed?                 |
 |----------------|------------------------------------------|
-| Initialization | ✅ (SlotPool, BufRing, Vec with_capacity) |
-| Steady state   | ❌ **Zero**                               |
-| Teardown       | ✅ (Drop impls)                           |
+| Initialization | Yes (SlotPool, BufRing, Vec with_capacity) |
+| Steady state   | NO **Zero**                              |
+| Teardown       | Yes (Drop impls)                         |
 
 #### Investigation Triggers
 
 ```
-p99 > p50 × 2       → investigate tail latency
-> 10% regression     → requires justification + benchmark comparison
-any allocation       → reject (use heaptrack / DHAT to verify)
-new syscall          → reject (use strace to verify)
+p99 > p50 x 2       - investigate tail latency
+> 10% regression     - requires justification + benchmark comparison
+any allocation       - reject (use heaptrack / DHAT to verify)
+new syscall          - reject (use strace to verify)
 ```
 
 ---
@@ -705,9 +705,8 @@ Architecture defines intent.
 Enforcement ensures invariants.
 Benchmarks validate reality.
 
-If it allocates in steady state → reject.
-If it adds a syscall to the duty cycle → reject.
-If it moves pinned memory → reject.
-If it can't be measured → it doesn't exist.
+If it allocates in steady state - reject.
+If it adds a syscall to the duty cycle - reject.
+If it moves pinned memory - reject.
+If it can't be measured - it doesn't exist.
 ```
-

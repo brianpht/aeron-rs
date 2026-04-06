@@ -26,7 +26,7 @@ impl Default for NanoClock {
     }
 }
 
-/// Cached clock — caches the last read for tight loops where
+/// Cached clock - caches the last read for tight loops where
 /// you poll time once per duty cycle iteration.
 pub struct CachedNanoClock {
     inner: NanoClock,

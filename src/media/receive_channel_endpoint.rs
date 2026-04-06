@@ -1,5 +1,5 @@
 
-// Receive channel endpoint — receives data, sends control messages (SM, NAK, RTTM).
+// Receive channel endpoint - receives data, sends control messages (SM, NAK, RTTM).
 
 use libc;
 
@@ -57,10 +57,10 @@ pub struct ReceiveChannelEndpoint {
     pub channel: UdpChannel,
     pub transport: UdpChannelTransport,
     pub transport_idx: Option<usize>,
-    /// Pre-sized flat array for pending SMs — no allocation in steady state.
+    /// Pre-sized flat array for pending SMs - no allocation in steady state.
     pending_sms: [PendingSm; MAX_PENDING_SM],
     pending_sms_len: usize,
-    /// Pre-sized flat array for pending NAKs — no allocation in steady state.
+    /// Pre-sized flat array for pending NAKs - no allocation in steady state.
     pending_naks: [PendingNak; MAX_PENDING_NAK],
     pending_naks_len: usize,
     /// Scratch buffer for SM frames.
@@ -84,7 +84,7 @@ impl ReceiveChannelEndpoint {
         }
     }
 
-    /// Register with the poller (monomorphized — no vtable dispatch).
+    /// Register with the poller (monomorphized - no vtable dispatch).
     pub fn register<P: TransportPoller>(&mut self, poller: &mut P) -> std::io::Result<()> {
         let idx = poller.add_transport(&mut self.transport)?;
         self.transport_idx = Some(idx);

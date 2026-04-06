@@ -18,10 +18,10 @@ pub struct SendChannelEndpoint {
     pub transport: UdpChannelTransport,
     pub transport_idx: Option<usize>,
 
-    /// Status messages received — pre-sized flat ring, no allocation in steady state.
+    /// Status messages received - pre-sized flat ring, no allocation in steady state.
     recent_sm: [StatusMessageInfo; MAX_RECENT_SM],
     recent_sm_len: usize,
-    /// NAKs received — pre-sized flat ring, no allocation in steady state.
+    /// NAKs received - pre-sized flat ring, no allocation in steady state.
     recent_naks: [NakInfo; MAX_RECENT_NAK],
     recent_naks_len: usize,
 
@@ -31,7 +31,7 @@ pub struct SendChannelEndpoint {
     setup_buf: [u8; SETUP_TOTAL_LENGTH],
 }
 
-/// Stored SM — only holds the wire-format struct (session_id / stream_id
+/// Stored SM - only holds the wire-format struct (session_id / stream_id
 /// are already inside `StatusMessage`, no need for redundant copies).
 #[derive(Clone, Copy)]
 struct StatusMessageInfo {
@@ -46,7 +46,7 @@ impl Default for StatusMessageInfo {
     }
 }
 
-/// Stored NAK — only holds the wire-format struct.
+/// Stored NAK - only holds the wire-format struct.
 #[derive(Clone, Copy)]
 struct NakInfo {
     nak: NakHeader,
@@ -75,7 +75,7 @@ impl SendChannelEndpoint {
         }
     }
 
-    /// Register with the poller (monomorphized — no vtable dispatch).
+    /// Register with the poller (monomorphized - no vtable dispatch).
     pub fn register<P: TransportPoller>(&mut self, poller: &mut P) -> std::io::Result<()> {
         let idx = poller.add_transport(&mut self.transport)?;
         self.transport_idx = Some(idx);
