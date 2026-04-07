@@ -1,18 +1,19 @@
 # Session Summary: RetransmitHandler Plan
 
-**Date:** 2026-04-06  
-**Duration:** ~1 interaction  
+**Date:** 2026-04-06
+**Duration:** ~1 interaction
 **Focus Area:** media/retransmit_handler, agent/sender
+**Implementation Date:** 2026-04-07
 
 ## Objectives
 
-- [ ] Design RetransmitHandler struct with pre-sized flat array of actions
-- [ ] Design on_nak() API for NAK scheduling with dedup and delay
-- [ ] Design process_timeouts() API for DELAY->RETRANSMIT->LINGER lifecycle
-- [ ] Design integration into SenderAgent duty cycle (process_sm_and_nak + do_retransmit)
-- [ ] Add scan_term_at() to SenderPublication for concurrent retransmit reads
-- [ ] Add retransmit_scan() to PublicationEntry via enum dispatch
-- [ ] Produce implementation plan with test and benchmark coverage
+- [x] Design RetransmitHandler struct with pre-sized flat array of actions
+- [x] Design on_nak() API for NAK scheduling with dedup and delay
+- [x] Design process_timeouts() API for DELAY->RETRANSMIT->LINGER lifecycle
+- [x] Design integration into SenderAgent duty cycle (process_sm_and_nak + do_retransmit)
+- [x] Add scan_term_at() to SenderPublication for concurrent retransmit reads
+- [x] Add retransmit_scan() to PublicationEntry via enum dispatch
+- [x] Produce implementation plan with test and benchmark coverage
 
 ## Design Overview
 
@@ -359,66 +360,100 @@ The retransmit scan reads from the term buffer at the NAK's
 3. Each emitted frame is sent individually via `endpoint.send_data()`
 4. Frame length is capped at `mtu` per send
 
-## Tests Planned
+## Tests
 
-| Test Class | Method | Type | Status |
-|------------|--------|------|--------|
-| `media::retransmit_handler` | `retransmit_action_default_inactive` | Unit | Planned |
-| `media::retransmit_handler` | `on_nak_schedules_delay` | Unit | Planned |
-| `media::retransmit_handler` | `on_nak_dedup_same_range` | Unit | Planned |
-| `media::retransmit_handler` | `on_nak_rejects_when_full` | Unit | Planned |
-| `media::retransmit_handler` | `process_timeouts_delay_to_callback` | Unit | Planned |
-| `media::retransmit_handler` | `process_timeouts_linger_to_inactive` | Unit | Planned |
-| `media::retransmit_handler` | `process_timeouts_not_yet_expired` | Unit | Planned |
-| `media::retransmit_handler` | `linger_prevents_reschedule` | Unit | Planned |
-| `media::retransmit_handler` | `linger_expires_allows_reschedule` | Unit | Planned |
-| `media::retransmit_handler` | `active_count_tracks_correctly` | Unit | Planned |
-| `media::concurrent_publication` | `scan_term_at_reads_committed` | Unit | Planned |
-| `media::concurrent_publication` | `scan_term_at_does_not_advance_position` | Unit | Planned |
-| `agent_duty_cycle` | `sender_retransmit_end_to_end` | Integration | Planned |
-| `agent_duty_cycle` | `retransmit_out_of_buffer_rejected` | Integration | Planned |
+### Unit Tests - `media::retransmit_handler` (11 tests)
 
-## Benchmarks Planned
+| Method | Status |
+|--------|--------|
+| `retransmit_action_default_inactive` | Done |
+| `on_nak_schedules_delay` | Done |
+| `on_nak_dedup_same_range` | Done |
+| `on_nak_different_offset_not_deduped` | Done |
+| `on_nak_rejects_when_full` | Done |
+| `process_timeouts_delay_to_callback` | Done |
+| `process_timeouts_linger_to_inactive` | Done |
+| `process_timeouts_not_yet_expired` | Done |
+| `linger_prevents_reschedule` | Done |
+| `linger_expires_allows_reschedule` | Done |
+| `active_count_tracks_correctly` | Done |
 
-| Benchmark | File | Target |
-|-----------|------|--------|
-| `retransmit: on_nak (schedule, empty table)` | `benches/retransmit.rs` | < 50 ns |
-| `retransmit: on_nak (dedup, full table scan)` | `benches/retransmit.rs` | < 200 ns |
-| `retransmit: process_timeouts (64 entries, 1 expired)` | `benches/retransmit.rs` | < 300 ns |
-| `retransmit: process_timeouts (64 entries, 0 expired)` | `benches/retransmit.rs` | < 200 ns |
-| `retransmit: full NAK-to-resend (1 frame)` | `benches/retransmit.rs` | < 500 ns |
+### Unit Tests - `media::concurrent_publication` (6 new tests)
+
+| Method | Status |
+|--------|--------|
+| `scan_term_at_reads_committed` | Done |
+| `scan_term_at_does_not_advance_position` | Done |
+| `scan_term_at_invalid_partition_returns_zero` | Done |
+| `scan_term_at_empty_returns_zero` | Done |
+| `sender_pub_compute_position` | Done |
+| `sender_pub_position_reflects_offers` | Done |
+
+### Unit Tests - `context` (3 new tests)
+
+| Method | Status |
+|--------|--------|
+| `default_sender_params` (updated) | Done |
+| `validate_retransmit_linger_zero` | Done |
+| `validate_retransmit_linger_negative` | Done |
+
+### Integration Tests - `agent_duty_cycle`
+
+| Method | Status |
+|--------|--------|
+| `sender_retransmit_end_to_end` | Deferred |
+| `retransmit_out_of_buffer_rejected` | Deferred |
+
+> Integration tests deferred - requires injecting NAK frames into
+> SendChannelEndpoint from a real UDP socket to trigger the full
+> drain_naks -> on_nak -> process_timeouts -> retransmit_scan ->
+> send_data path end-to-end. Current unit test coverage validates
+> each component in isolation.
+
+## Benchmark Results (2026-04-07)
+
+| Benchmark | Target | Actual | Status | Headroom |
+|-----------|--------|--------|--------|----------|
+| `on_nak (schedule, empty table)` | < 50 ns | 41.4 ns | Pass | 17% |
+| `on_nak (dedup, full table scan)` | < 200 ns | 26.2 ns | Pass | 87% |
+| `process_timeouts (64 entries, 1 expired)` | < 300 ns | 84.6 ns | Pass | 72% |
+| `process_timeouts (64 entries, 0 expired)` | < 200 ns | 25.9 ns | Pass | 87% |
+| `full NAK-to-callback (1 frame)` | < 500 ns | 59.6 ns | Pass | 88% |
+
+All 5 benchmarks pass targets with substantial margin. The 2.5 KiB
+flat array fits in L1 cache; branch predictor handles the common
+"not expired" path efficiently.
 
 ## Issues / Risks
 
 | Issue | Mitigation | Blocking |
 |-------|------------|----------|
-| `process_sm_and_nak` borrow checker issue (endpoints + publications + retransmit_handler) | Destructure self into disjoint field borrows - same pattern as `do_send()` | No |
-| `do_retransmit` needs `&self.publications` + `&mut self.poller` + `&mut self.retransmit_handler` simultaneously | Destructure self. `process_timeouts` callback receives scalars, actual send happens in outer scope. | No |
-| NAK for data in concurrent publication's SharedLogBuffer requires Acquire-load scan | New `scan_term_at()` method mirrors sender_scan protocol. Safe because back-pressure guarantees partition won't be cleaned while data is still needed. | No |
+| `process_sm_and_nak` borrow checker issue (endpoints + publications + retransmit_handler) | Destructure self into disjoint field borrows - same pattern as `do_send()` | Resolved |
+| `do_retransmit` needs `&self.publications` + `&mut self.poller` + `&mut self.retransmit_handler` simultaneously | Destructure self. `process_timeouts` callback receives scalars, actual send happens in outer scope. | Resolved |
+| NAK for data in concurrent publication's SharedLogBuffer requires Acquire-load scan | New `scan_term_at()` method mirrors sender_scan protocol. Safe because back-pressure guarantees partition won't be cleaned while data is still needed. | Resolved |
 | Linear scan to match publication on NAK (O(n), n <= 64) | Acceptable for n <= 64. If publications grow, add hash index (like receiver's image_index). | No |
-| `retransmit_scan` on PublicationEntry needs `&self` but `do_retransmit` also needs `&mut self.retransmit_handler` | Pass publications as a separate local via destructure. retransmit_scan only needs `&self` on PublicationEntry. | No |
+| `retransmit_scan` on PublicationEntry needs `&self` but `do_retransmit` also needs `&mut self.retransmit_handler` | Pass publications as a separate local via destructure. retransmit_scan only needs `&self` on PublicationEntry. | Resolved |
+| Integration tests require NAK injection via real UDP socket | Deferred - unit tests cover each component. Integration tests to be added when receiver-side NAK generation is implemented. | No |
 
 ## Implementation Order
 
-1. **High:** Add `retransmit_unicast_linger_ns` to `src/context.rs` with validation
-2. **High:** Create `src/media/retransmit_handler.rs` with RetransmitHandler + unit tests
-3. **High:** Add `SenderPublication::scan_term_at()` to `src/media/concurrent_publication.rs`
-4. **High:** Add `retransmit_scan()` + position accessors to PublicationEntry in `src/agent/sender.rs`
-5. **High:** Wire up RetransmitHandler in SenderAgent (field, constructor, process_sm_and_nak, do_retransmit, do_work)
-6. **Medium:** Add integration tests in `tests/agent_duty_cycle.rs`
-7. **Medium:** Add `pub mod retransmit_handler` to `src/media/mod.rs`
-8. **Low:** Add criterion benchmarks in `benches/retransmit.rs` + Cargo.toml bench target
+1. **High:** Add `retransmit_unicast_linger_ns` to `src/context.rs` with validation - **Done**
+2. **High:** Create `src/media/retransmit_handler.rs` with RetransmitHandler + unit tests - **Done**
+3. **High:** Add `SenderPublication::scan_term_at()` to `src/media/concurrent_publication.rs` - **Done**
+4. **High:** Add `retransmit_scan()` + position accessors to PublicationEntry in `src/agent/sender.rs` - **Done**
+5. **High:** Wire up RetransmitHandler in SenderAgent (field, constructor, process_sm_and_nak, do_retransmit, do_work) - **Done**
+6. **Medium:** Add integration tests in `tests/agent_duty_cycle.rs` - **Deferred**
+7. **Medium:** Add `pub mod retransmit_handler` to `src/media/mod.rs` - **Done**
+8. **Low:** Add criterion benchmarks in `benches/retransmit.rs` + Cargo.toml bench target - **Done**
 
-## Files to Create/Modify
+## Files Created/Modified
 
-| Status | File | Est. Lines | Tests | Description |
-|--------|------|------------|-------|-------------|
-| A | `src/media/retransmit_handler.rs` | ~250 | ~10 | RetransmitHandler, RetransmitAction, RetransmitState, on_nak, process_timeouts |
+| Status | File | Lines | Tests | Description |
+|--------|------|-------|-------|-------------|
+| A | `src/media/retransmit_handler.rs` | 370 | 11 | RetransmitHandler, RetransmitAction, RetransmitState, on_nak, process_timeouts |
 | M | `src/media/mod.rs` | +1 | - | Register retransmit_handler module |
-| M | `src/context.rs` | +10 | +2 | Add retransmit_unicast_linger_ns field, default, validation |
-| M | `src/media/concurrent_publication.rs` | +50 | +2 | Add SenderPublication::scan_term_at() |
-| M | `src/agent/sender.rs` | +80 | - | RetransmitHandler field, do_retransmit(), fix process_sm_and_nak(), PublicationEntry accessors |
-| M | `tests/agent_duty_cycle.rs` | +40 | +2 | Integration tests for retransmit |
-| A | `benches/retransmit.rs` | ~100 | - | Criterion benchmarks |
-| M | `Cargo.toml` | +5 | - | Bench target for retransmit |
-
+| M | `src/context.rs` | +14 | +3 | Add retransmit_unicast_linger_ns field, default, validation |
+| M | `src/media/concurrent_publication.rs` | +100 | +6 | Add scan_term_at(), compute_position(), pub_position() to SenderPublication |
+| M | `src/agent/sender.rs` | +130 | - | RetransmitHandler field, do_retransmit(), fix process_sm_and_nak(), PublicationEntry accessors (retransmit_scan, compute_position, sender_position, pub_position, dest_addr) |
+| A | `benches/retransmit.rs` | 122 | - | 5 Criterion benchmarks, all passing targets |
+| M | `Cargo.toml` | +4 | - | Bench target for retransmit |

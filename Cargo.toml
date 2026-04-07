@@ -40,5 +40,10 @@ harness = false
 [[bench]]
 name = "io_uring_submit"
 harness = false
+
+[[bench]]
+name = "retransmit"
+harness = false
+
 [[example]]
 name = "diag_ping"

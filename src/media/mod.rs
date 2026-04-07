@@ -6,6 +6,7 @@ pub mod poller;
 pub mod term_buffer;
 pub mod transport;
 pub mod uring_poller;
+pub mod retransmit_handler;
 pub mod send_channel_endpoint;
 pub mod receive_channel_endpoint;
 

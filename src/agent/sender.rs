@@ -10,7 +10,9 @@ use crate::media::concurrent_publication::{
 };
 use crate::media::network_publication::NetworkPublication;
 use crate::media::poller::{RecvMessage, TransportPoller};
+use crate::media::retransmit_handler::RetransmitHandler;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
+use crate::media::term_buffer::{RawLog, PARTITION_COUNT};
 use crate::media::uring_poller::UringTransportPoller;
 
 /// Represents one active network publication within the sender.
@@ -163,6 +165,71 @@ impl PublicationEntry {
             PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.sender_scan(limit, emit),
         }
     }
+
+    /// Read frames from term buffer for retransmit (enum dispatch, no dyn).
+    /// Takes &self - does not advance sender_position.
+    #[inline]
+    fn retransmit_scan<F>(
+        &self,
+        term_id: i32,
+        offset: u32,
+        limit: u32,
+        emit: F,
+    ) -> u32
+    where
+        F: FnMut(u32, &[u8]),
+    {
+        let initial = self.initial_term_id();
+        let part_idx = RawLog::partition_index(term_id, initial);
+        match self {
+            PublicationEntry::Local { publication, .. } => {
+                publication.raw_log().scan_frames(part_idx, offset, limit, emit)
+            }
+            PublicationEntry::Concurrent { sender_pub, .. } => {
+                sender_pub.scan_term_at(part_idx, offset, limit, emit)
+            }
+        }
+    }
+
+    /// Compute absolute position from term_id and term_offset.
+    #[inline]
+    fn compute_position(&self, term_id: i32, term_offset: u32) -> i64 {
+        match self {
+            PublicationEntry::Local { publication, .. } => {
+                publication.compute_position(term_id, term_offset)
+            }
+            PublicationEntry::Concurrent { sender_pub, .. } => {
+                sender_pub.compute_position(term_id, term_offset)
+            }
+        }
+    }
+
+    /// Sender position (highest scanned byte).
+    #[inline]
+    fn sender_position(&self) -> i64 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.sender_position(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.sender_position(),
+        }
+    }
+
+    /// Pub position (highest published byte).
+    #[inline]
+    fn pub_position(&self) -> i64 {
+        match self {
+            PublicationEntry::Local { publication, .. } => publication.pub_position(),
+            PublicationEntry::Concurrent { sender_pub, .. } => sender_pub.pub_position(),
+        }
+    }
+
+    /// Destination address for this publication.
+    #[inline]
+    fn dest_addr(&self) -> Option<&libc::sockaddr_storage> {
+        match self {
+            PublicationEntry::Local { dest_addr, .. } => dest_addr.as_ref(),
+            PublicationEntry::Concurrent { dest_addr, .. } => dest_addr.as_ref(),
+        }
+    }
 }
 
 /// Maximum expected endpoints / publications. Pre-sized to avoid
@@ -174,6 +241,7 @@ pub struct SenderAgent {
     poller: UringTransportPoller,
     endpoints: Vec<SendChannelEndpoint>,
     publications: Vec<PublicationEntry>,
+    retransmit_handler: RetransmitHandler,
     clock: CachedNanoClock,
     duty_cycle_ratio: usize,
     duty_cycle_counter: usize,
@@ -194,6 +262,10 @@ impl SenderAgent {
             poller,
             endpoints: Vec::with_capacity(MAX_ENDPOINTS),
             publications: Vec::with_capacity(MAX_PUBLICATIONS),
+            retransmit_handler: RetransmitHandler::new(
+                ctx.retransmit_unicast_delay_ns,
+                ctx.retransmit_unicast_linger_ns,
+            ),
             clock: CachedNanoClock::new(),
             duty_cycle_ratio: ctx.send_duty_cycle_ratio,
             duty_cycle_counter: 0,
@@ -405,11 +477,15 @@ impl SenderAgent {
         }
     }
 
-    fn process_sm_and_nak(&mut self) {
-        for ep in &mut self.endpoints {
+    fn process_sm_and_nak(&mut self, now_ns: i64) {
+        // Destructure self for disjoint field borrows.
+        let publications = &mut self.publications;
+        let endpoints = &mut self.endpoints;
+        let retransmit_handler = &mut self.retransmit_handler;
+
+        for ep in endpoints.iter_mut() {
             ep.drain_sm(|sm| {
-                // Find matching publication and update sender position.
-                for pub_entry in &mut self.publications {
+                for pub_entry in publications.iter_mut() {
                     if pub_entry.session_id() == sm.session_id
                         && pub_entry.stream_id() == sm.stream_id
                     {
@@ -420,20 +496,70 @@ impl SenderAgent {
             });
 
             ep.drain_naks(|nak| {
-                // Schedule retransmit (phase 3).
-                let sid = nak.session_id;
-                let stid = nak.stream_id;
-                let toff = nak.term_offset;
-                let nlen = nak.length;
-                tracing::trace!(
-                    session = sid,
-                    stream = stid,
-                    offset = toff,
-                    len = nlen,
-                    "schedule retransmit"
-                );
+                retransmit_handler.on_nak(nak, now_ns);
             });
         }
+    }
+
+    fn do_retransmit(&mut self, now_ns: i64) -> i32 {
+        let publications = &self.publications;
+        let endpoints = &self.endpoints;
+        let poller = &mut self.poller;
+        let handler = &mut self.retransmit_handler;
+        let mut work_count = 0i32;
+
+        handler.process_timeouts(now_ns, |sid, stid, term_id, term_off, len| {
+            // Find matching publication (linear scan, n <= 64).
+            let pub_match = publications.iter().find(|p| {
+                p.session_id() == sid && p.stream_id() == stid
+            });
+
+            let Some(pub_entry) = pub_match else {
+                return; // Publication removed since NAK received.
+            };
+
+            // Validate NAK range is still in the term buffer.
+            let nak_position = pub_entry.compute_position(
+                term_id, term_off as u32,
+            );
+            let sender_pos = pub_entry.sender_position();
+            let term_length = pub_entry.term_length() as i64;
+            let buffer_start = sender_pos.wrapping_sub(
+                (PARTITION_COUNT as i64 - 1) * term_length,
+            );
+
+            // Half-range wrapping check: nak_position must be
+            // >= buffer_start and < pub_position.
+            let from_start = nak_position.wrapping_sub(buffer_start);
+            let pub_pos = pub_entry.pub_position();
+            let range = pub_pos.wrapping_sub(buffer_start);
+            if from_start < 0 || from_start >= range {
+                return; // Data overwritten or not yet written.
+            }
+
+            // Read frames from term buffer and send.
+            let ep_idx = pub_entry.endpoint_idx();
+            let dest = pub_entry.dest_addr();
+            let mtu = pub_entry.mtu();
+            let limit = if (len as u32) < mtu { len as u32 } else { mtu };
+
+            pub_entry.retransmit_scan(
+                term_id,
+                term_off as u32,
+                limit,
+                |_off, data| {
+                    if let Some(ep) = endpoints.get(ep_idx) {
+                        let _ = ep.send_data(poller, data, dest);
+                        work_count += 1;
+                    }
+                },
+            );
+        });
+
+        if work_count > 0 {
+            let _ = poller.flush();
+        }
+        work_count
     }
 }
 
@@ -452,7 +578,8 @@ impl Agent for SenderAgent {
         // Step 2: Poll for incoming SM / NAK / ERR.
         if bytes_sent == 0 || self.duty_cycle_counter >= self.duty_cycle_ratio {
             work_count += self.poll_control();
-            self.process_sm_and_nak();
+            self.process_sm_and_nak(now_ns);
+            work_count += self.do_retransmit(now_ns);
             self.duty_cycle_counter = 0;
         } else {
             self.duty_cycle_counter += 1;

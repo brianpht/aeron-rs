@@ -73,7 +73,7 @@
 |-------|------------|----------|
 | Aeron uses 3 partitions with `% 3` - forbidden by coding rules | Use 4 partitions with `& 3` bitmask; 33% more memory per publication | No |
 | Cross-thread offer needs atomics on pub_position | Defer to future phase; current plan is single-threaded | No |
-| Retransmit requires reading old frames from non-active partitions | Term buffer design supports this but retransmit scheduling deferred | No |
+| Retransmit requires reading old frames from non-active partitions | Term buffer design supports this but retransmit scheduling deferred | Resolved (2026-04-07) |
 
 ## Next Steps
 
@@ -84,7 +84,7 @@
 5. ~~**Medium:** Update `src/media/mod.rs` module exports~~ - DONE (added network_publication)
 6. ~~**Medium:** Add benchmark for offer() with term buffer~~ - DONE (6 new benchmarks in publication_offer.rs)
 7. ~~**Low:** Design cross-thread offer with AtomicI64 pub_position (Release/Acquire)~~ - DONE (860 lines, 24 unit tests, 5 integration tests)
-8. **Low:** Design RetransmitHandler for NAK-driven retransmission from term buffer
+8. ~~**Low:** Design RetransmitHandler for NAK-driven retransmission from term buffer~~ - DONE (see [retransmit-handler-plan](2026-04-06-retransmit-handler-plan.md): 370 lines, 11 unit tests, 5 benchmarks)
 
 ## Files Changed
 
@@ -92,13 +92,15 @@
 
 | Status | File | Lines | Tests |
 |--------|------|-------|-------|
-| A | `src/media/term_buffer.rs` | 731+160 | 28+14 |
+| A | `src/media/term_buffer.rs` | 1049 | 42 |
 | A | `src/media/network_publication.rs` | 794 | 32 |
-| A | `src/media/concurrent_publication.rs` | 860 | 24 |
-| M | `src/media/mod.rs` | +2 | - |
-| M | `src/agent/sender.rs` | 380 | - |
+| A | `src/media/concurrent_publication.rs` | 1017 | 30 |
+| A | `src/media/retransmit_handler.rs` | 370 | 11 |
+| M | `src/media/mod.rs` | +3 | - |
+| M | `src/agent/sender.rs` | 591 | - |
 | M | `tests/agent_duty_cycle.rs` | +80 | 5 new |
 | A | `tests/concurrent_offer.rs` | 190 | 5 new |
-| M | `src/context.rs` | +15 | 5 new |
+| M | `src/context.rs` | +29 | 8 new |
 | M | `benches/publication_offer.rs` | +140 | 6 new benchmarks |
+| A | `benches/retransmit.rs` | 122 | 5 new benchmarks |
 

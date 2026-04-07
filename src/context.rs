@@ -31,6 +31,8 @@ pub enum ContextValidationError {
     SocketSndbufZero,
     /// `term_buffer_length` must be a power-of-two >= 32.
     TermBufferLengthInvalid,
+    /// `retransmit_unicast_linger_ns` must be > 0.
+    RetransmitLingerZero,
 }
 
 impl std::fmt::Display for ContextValidationError {
@@ -54,6 +56,9 @@ impl std::fmt::Display for ContextValidationError {
             Self::SocketSndbufZero => f.write_str("socket_sndbuf must be > 0"),
             Self::TermBufferLengthInvalid => {
                 f.write_str("term_buffer_length must be power-of-two >= 32")
+            }
+            Self::RetransmitLingerZero => {
+                f.write_str("retransmit_unicast_linger_ns must be > 0")
             }
         }
     }
@@ -80,6 +85,7 @@ pub struct DriverContext {
     // ── Sender ──
     pub send_duty_cycle_ratio: usize,
     pub retransmit_unicast_delay_ns: i64,
+    pub retransmit_unicast_linger_ns: i64,
     pub heartbeat_interval_ns: i64,
     /// Term buffer length per publication partition, in bytes.
     /// Must be power-of-two >= 32. Each publication allocates
@@ -114,6 +120,7 @@ impl Default for DriverContext {
 
             send_duty_cycle_ratio: 4,
             retransmit_unicast_delay_ns: 0,
+            retransmit_unicast_linger_ns: Duration::from_millis(60).as_nanos() as i64,
             heartbeat_interval_ns: Duration::from_millis(100).as_nanos() as i64,
             term_buffer_length: 64 * 1024, // 64 KiB
 
@@ -173,6 +180,9 @@ impl DriverContext {
         if self.term_buffer_length < 32 || !self.term_buffer_length.is_power_of_two() {
             return Err(ContextValidationError::TermBufferLengthInvalid);
         }
+        if self.retransmit_unicast_linger_ns <= 0 {
+            return Err(ContextValidationError::RetransmitLingerZero);
+        }
         Ok(())
     }
 }
@@ -211,6 +221,11 @@ mod tests {
         assert_eq!(ctx.send_duty_cycle_ratio, 4);
         assert_eq!(ctx.heartbeat_interval_ns, Duration::from_millis(100).as_nanos() as i64);
         assert_eq!(ctx.term_buffer_length, 64 * 1024);
+        assert_eq!(ctx.retransmit_unicast_delay_ns, 0);
+        assert_eq!(
+            ctx.retransmit_unicast_linger_ns,
+            Duration::from_millis(60).as_nanos() as i64,
+        );
     }
 
     #[test]
@@ -371,6 +386,26 @@ mod tests {
         let mut ctx = DriverContext::default();
         ctx.term_buffer_length = 16 * 1024 * 1024; // 16 MiB
         assert!(ctx.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_retransmit_linger_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.retransmit_unicast_linger_ns = 0;
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::RetransmitLingerZero),
+        );
+    }
+
+    #[test]
+    fn validate_retransmit_linger_negative() {
+        let mut ctx = DriverContext::default();
+        ctx.retransmit_unicast_linger_ns = -1;
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::RetransmitLingerZero),
+        );
     }
 
     #[test]

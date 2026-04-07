@@ -468,6 +468,97 @@ impl SenderPublication {
         let pub_pos = self.inner.pub_position.load(Ordering::Relaxed);
         (pub_pos & self.inner.term_length_mask as i64) as u32
     }
+
+    /// Read committed frames from a specific term position.
+    /// For retransmit use - does not advance sender_position.
+    ///
+    /// Uses Acquire-ordered atomic loads to detect committed frames
+    /// in the SharedLogBuffer (same protocol as sender_scan).
+    ///
+    /// Returns total bytes of frames emitted.
+    pub fn scan_term_at<F>(
+        &self,
+        partition_idx: usize,
+        offset: u32,
+        limit: u32,
+        mut emit: F,
+    ) -> u32
+    where
+        F: FnMut(u32, &[u8]),
+    {
+        let inner = &*self.inner;
+
+        if partition_idx >= PARTITION_COUNT {
+            return 0;
+        }
+
+        let tl = inner.term_length as usize;
+        let part_base = partition_idx * tl;
+        let buf_ptr = inner.log.as_ptr();
+
+        let mut pos = offset;
+        let mut scanned: u32 = 0;
+
+        while pos < inner.term_length && scanned < limit {
+            let remaining = (inner.term_length - pos) as usize;
+            if remaining < 4 {
+                break;
+            }
+
+            let byte_offset = part_base + pos as usize;
+
+            // Acquire load of frame_length - pairs with publisher's Release store.
+            let frame_length = unsafe { atomic_frame_length_load(buf_ptr, byte_offset) };
+
+            // Zero or negative means uncommitted / not yet written.
+            if frame_length <= 0 {
+                break;
+            }
+
+            let frame_len_u = frame_length as u32;
+
+            // Frame too small to contain a DataHeader.
+            if frame_len_u < DATA_HEADER_LENGTH as u32 {
+                break;
+            }
+
+            let aligned_len = align_frame_length(frame_len_u as usize) as u32;
+
+            // Would exceed partition bounds.
+            if pos + aligned_len > inner.term_length {
+                break;
+            }
+
+            // SAFETY: Acquire load of frame_length guarantees all header + payload
+            // bytes written by the publisher (before their Release store) are visible.
+            let frame_slice = unsafe {
+                std::slice::from_raw_parts(
+                    buf_ptr.add(byte_offset),
+                    frame_len_u as usize,
+                )
+            };
+
+            emit(pos, frame_slice);
+
+            pos += aligned_len;
+            scanned += aligned_len;
+        }
+
+        scanned
+    }
+
+    /// Compute an absolute i64 position from a term_id and term_offset.
+    #[inline]
+    pub fn compute_position(&self, term_id: i32, term_offset: u32) -> i64 {
+        let term_count = term_id.wrapping_sub(self.inner.initial_term_id) as i64;
+        term_count * self.inner.term_length as i64 + term_offset as i64
+    }
+
+    /// Publisher's highest published byte position (Acquire load).
+    #[inline]
+    pub fn pub_position(&self) -> i64 {
+        self.inner.pub_position.load(Ordering::Acquire)
+    }
 }
 
 // ---- Tests ----
@@ -476,7 +567,7 @@ impl SenderPublication {
 mod tests {
     use super::*;
     use crate::frame::DataHeader;
-    use crate::media::term_buffer::FRAME_ALIGNMENT;
+    use crate::media::term_buffer::{FRAME_ALIGNMENT, partition_index};
 
     const TEST_TERM_LENGTH: u32 = 1024;
     const TEST_MTU: u32 = 1408;
@@ -855,6 +946,72 @@ mod tests {
         assert_eq!(send_h.initial_term_id(), 100);
         assert_eq!(send_h.term_length(), 1024);
         assert_eq!(send_h.mtu(), 1408);
+    }
+
+    // ---- scan_term_at ----
+
+    #[test]
+    fn scan_term_at_reads_committed() {
+        let (mut pub_h, send_h) = make_pair();
+        let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+        pub_h.offer(&payload).unwrap();
+
+        let part_idx = partition_index(0, 0);
+        let mut found = false;
+        let scanned = send_h.scan_term_at(part_idx, 0, TEST_TERM_LENGTH, |off, data| {
+            assert_eq!(off, 0);
+            let parsed = DataHeader::parse(data);
+            assert!(parsed.is_some());
+            let hdr = parsed.unwrap();
+            assert_eq!({ hdr.session_id }, 42);
+            assert_eq!({ hdr.stream_id }, 7);
+            let pl = hdr.payload(data);
+            assert_eq!(pl, &[0xDE, 0xAD, 0xBE, 0xEF]);
+            found = true;
+        });
+
+        assert!(found);
+        assert!(scanned > 0);
+    }
+
+    #[test]
+    fn scan_term_at_does_not_advance_position() {
+        let (mut pub_h, send_h) = make_pair();
+        pub_h.offer(&[]).unwrap();
+
+        let pos_before = send_h.sender_position();
+        send_h.scan_term_at(0, 0, TEST_TERM_LENGTH, |_, _| {});
+        assert_eq!(send_h.sender_position(), pos_before);
+    }
+
+    #[test]
+    fn scan_term_at_invalid_partition_returns_zero() {
+        let (_pub_h, send_h) = make_pair();
+        let scanned = send_h.scan_term_at(99, 0, TEST_TERM_LENGTH, |_, _| {});
+        assert_eq!(scanned, 0);
+    }
+
+    #[test]
+    fn scan_term_at_empty_returns_zero() {
+        let (_pub_h, send_h) = make_pair();
+        let scanned = send_h.scan_term_at(0, 0, TEST_TERM_LENGTH, |_, _| {});
+        assert_eq!(scanned, 0);
+    }
+
+    #[test]
+    fn sender_pub_compute_position() {
+        let (_pub_h, send_h) = make_pair();
+        assert_eq!(send_h.compute_position(0, 0), 0);
+        assert_eq!(send_h.compute_position(0, 512), 512);
+        assert_eq!(send_h.compute_position(1, 0), TEST_TERM_LENGTH as i64);
+    }
+
+    #[test]
+    fn sender_pub_position_reflects_offers() {
+        let (mut pub_h, send_h) = make_pair();
+        assert_eq!(send_h.pub_position(), 0);
+        pub_h.offer(&[]).unwrap();
+        assert_eq!(send_h.pub_position(), FRAME_ALIGNMENT as i64);
     }
 }
 
