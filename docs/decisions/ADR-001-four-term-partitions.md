@@ -1,10 +1,16 @@
 # ADR-001: Use 4 Term Partitions Instead of Aeron's 3
 
 **Date:** 2026-04-06  
-**Status:** Proposed  
+**Status:** Accepted  
+**Decision Date:** 2026-04-06  
 **Deciders:** developer  
 **Related Tasks:** Term buffer write path implementation  
-**Related Sessions:** [Session 2026-04-06](../sessions/2026-04-06-term-buffer-write-path-plan.md)
+**Related Sessions:**
+- [Term Buffer Write Path](../sessions/2026-04-06-term-buffer-write-path-plan.md) - RawLog + NetworkPublication + SenderAgent integration
+- [Network Publication](../sessions/2026-04-06-network-publication-plan.md) - offer/scan API, back-pressure, term rotation
+- [Sender Refactor](../sessions/2026-04-06-sender-refactor-plan.md) - PublicationEntry owns NetworkPublication
+- [Cross-Thread Offer](../sessions/2026-04-06-cross-thread-offer-plan.md) - SharedLogBuffer reuses 4-partition layout
+- [Retransmit Handler](../sessions/2026-04-06-retransmit-handler-plan.md) - NAK range validation uses PARTITION_COUNT
 
 ## Context
 
@@ -59,29 +65,60 @@ Use 4 term partitions with `& 3` bitmask indexing for the partition computation 
 
 ## Consequences
 
-- **Positive:** Single-instruction partition index. Full compliance with coding rules. Simpler code.
-- **Negative:** 33% more term buffer memory per publication. Diverges from Aeron C/Java internal layout.
-- **Neutral:** Wire protocol unchanged. Receiver side unaffected. No impact on interop with Aeron peers.
+### Positive
+
+- Single AND instruction for partition index on every `offer()` and `sender_scan()` call.
+- Full compliance with the project's bitmask-only indexing rule.
+- Simpler code - no clever multiply-shift tricks or conditional branches.
+
+### Negative
+
+- 33% more term buffer memory per publication (4 * term_length instead of 3 * term_length).
+- Diverges from Aeron C/Java internal layout (3 partitions).
+
+### Neutral
+
+- Wire protocol unchanged. `term_id` and `initial_term_id` semantics are identical.
+- Receiver side unaffected. No impact on interop with Aeron peers.
+
+### Observed Outcomes (post-implementation)
+
+- **Back-pressure formula:** `max_ahead = term_length * (PARTITION_COUNT - 1)`. With 4 partitions the publisher can be up to 3 terms ahead of the sender. This provides 192 KiB of buffering at the default 64 KiB term length - sufficient to absorb sender-side jitter without stalling the publisher.
+- **Clean-entering-partition strategy:** During term rotation the publisher cleans the partition it is rotating INTO (not "3 ahead"). This avoids a subtle bug discovered during design: cleaning `(current + PARTITION_COUNT - 1) & 3` would destroy data in the partition the publisher just left, which the sender may not have scanned yet. Cleaning the entering partition is always safe because back-pressure guarantees the sender finished scanning its previous contents (the partition was last used 4 terms ago; the sender is at most 3 terms behind).
+- **Cross-thread SharedLogBuffer:** The concurrent publication (`ConcurrentPublication` + `SenderPublication`) wraps the same 4-partition `Vec<u8>` in `UnsafeCell`. The cleaning safety argument carries over unchanged - the `Arc<PublicationInner>` shares immutable `PARTITION_COUNT` and `term_length` config, and the atomic frame-length commit protocol does not alter the partition layout.
+- **Retransmit NAK validation:** The retransmit handler computes the oldest data still in the buffer as `sender_position - (PARTITION_COUNT - 1) * term_length`. NAKs for positions outside this range are rejected. The formula depends directly on `PARTITION_COUNT = 4`.
+- **Compile-time assertion:** `term_buffer.rs` includes `const _: () = assert!(PARTITION_COUNT.is_power_of_two());` to prevent regressions.
 
 ## Affected Components
 
-| Component | Impact | Description |
-|-----------|--------|-------------|
-| `media/term_buffer.rs` | High | New file - RawLog allocates 4 * term_length |
-| `media/network_publication.rs` | High | New file - partition_index uses `& 3` |
-| `agent/sender.rs` | Medium | PublicationEntry refactored to use NetworkPublication |
-| `context.rs` | Low | Add term_buffer_length config |
+| Component | Impact | Lines | Tests | Description |
+|-----------|--------|-------|-------|-------------|
+| `media/term_buffer.rs` | High | 1049 | 44 | `RawLog` allocates `PARTITION_COUNT * term_length`. `PARTITION_COUNT = 4`, `PARTITION_INDEX_MASK = 3`. `SharedLogBuffer` for cross-thread use. `partition_index()` free function. Compile-time power-of-two assertion. |
+| `media/network_publication.rs` | High | 793 | 32 | `NetworkPublication::offer()` and `sender_scan()` use `RawLog::partition_index()` (bitmask). Back-pressure limit = `(PARTITION_COUNT - 1) * term_length`. Clean-entering-partition on rotation. |
+| `media/concurrent_publication.rs` | High | 1017 | 30 | `ConcurrentPublication` + `SenderPublication` share `Arc<PublicationInner>` with `SharedLogBuffer`. Uses `partition_index()` for bitmask lookup. Atomic frame-length commit protocol over 4-partition buffer. `scan_term_at()` for retransmit reads. |
+| `agent/sender.rs` | Medium | 590 | - | `PublicationEntry` enum (Local/Concurrent) with dispatch methods. `do_send()` calls `sender_scan` (bitmask on every frame). `do_retransmit()` uses `PARTITION_COUNT` for NAK range validation. `retransmit_scan()` dispatches to `RawLog::scan_frames` or `SenderPublication::scan_term_at`. |
+| `media/retransmit_handler.rs` | Medium | 369 | 11 | `RetransmitHandler` validates NAK ranges against `(PARTITION_COUNT - 1) * term_length` buffer window. |
+| `context.rs` | Low | 417 | 29 | `term_buffer_length` config with power-of-two validation. `retransmit_unicast_linger_ns` for retransmit linger timeout. |
+| `benches/publication_offer.rs` | Low | ~140 | 6 benchmarks | `offer()` + `sender_scan()` benchmarks exercising bitmask partition index. |
+| `benches/retransmit.rs` | Low | 122 | 5 benchmarks | Retransmit handler benchmarks (on_nak, process_timeouts). |
+| `tests/agent_duty_cycle.rs` | Low | - | 9 | Integration tests for SenderAgent with NetworkPublication. |
+| `tests/concurrent_offer.rs` | Low | 190 | 5 | Cross-thread integration tests including 10K-message stress test. |
 
 ## Compliance Checklist
 
-- [ ] Code reflects decision
-- [ ] Tests updated
-- [ ] Documentation updated
-- [ ] Superseded ADRs updated
+- [x] Code reflects decision
+- [x] Tests updated (160+ unit tests, 14 integration tests, 11 benchmarks)
+- [x] Documentation updated (5 session summaries reference ADR-001)
+- [x] Superseded ADRs updated (N/A - no prior ADR)
 
 ## Revision History
 
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-04-06 | Initial draft | developer |
+| 2026-04-06 | term_buffer.rs (RawLog, 44 tests) + network_publication.rs (offer/scan, 32 tests) implemented | developer |
+| 2026-04-06 | SenderAgent refactored - PublicationEntry owns NetworkPublication. 5 new integration tests | developer |
+| 2026-04-06 | Cross-thread ConcurrentPublication + SenderPublication via SharedLogBuffer. 30 unit tests, 5 integration tests | developer |
+| 2026-04-07 | RetransmitHandler with NAK range validation using PARTITION_COUNT. 11 unit tests, 5 benchmarks | developer |
+| 2026-04-09 | Status promoted to Accepted - all implementation complete | developer |
 
