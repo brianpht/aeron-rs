@@ -1,5 +1,11 @@
 pub mod sender;
 pub mod receiver;
+pub mod conductor;
+pub mod idle_strategy;
+pub mod runner;
+
+pub use idle_strategy::{IdleStrategy, IdleStrategyState};
+pub use runner::{AgentRunner, AgentRunnerHandle};
 
 /// Error returned from agent duty-cycle work.
 #[derive(Debug, thiserror::Error)]

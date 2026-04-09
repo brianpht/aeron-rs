@@ -27,6 +27,14 @@ enum PublicationEntry {
         needs_setup: bool,
         time_of_last_send_ns: i64,
         time_of_last_setup_ns: i64,
+        /// Flow control: max absolute position the sender is permitted to
+        /// send up to. Derived from SM: consumption_position + receiver_window.
+        /// Initialized to term_length (initial window). Only advances forward.
+        sender_limit: i64,
+        /// Timestamp of last RTTM request sent.
+        time_of_last_rttm_ns: i64,
+        /// Smoothed RTT in nanoseconds (SRTT). Updated from RTTM replies.
+        last_rtt_ns: i64,
     },
     /// Cross-thread publication - sender side only (publisher handle given
     /// to the application thread).
@@ -37,6 +45,14 @@ enum PublicationEntry {
         needs_setup: bool,
         time_of_last_send_ns: i64,
         time_of_last_setup_ns: i64,
+        /// Flow control: max absolute position the sender is permitted to
+        /// send up to. Derived from SM: consumption_position + receiver_window.
+        /// Initialized to term_length (initial window). Only advances forward.
+        sender_limit: i64,
+        /// Timestamp of last RTTM request sent.
+        time_of_last_rttm_ns: i64,
+        /// Smoothed RTT in nanoseconds (SRTT). Updated from RTTM replies.
+        last_rtt_ns: i64,
     },
 }
 
@@ -153,6 +169,90 @@ impl PublicationEntry {
         }
     }
 
+    /// Current sender_limit (flow control position ceiling).
+    #[inline]
+    fn sender_limit(&self) -> i64 {
+        match self {
+            PublicationEntry::Local { sender_limit, .. } => *sender_limit,
+            PublicationEntry::Concurrent { sender_limit, .. } => *sender_limit,
+        }
+    }
+
+    /// Update sender_limit from a Status Message.
+    ///
+    /// Computes: new_limit = consumption_position + receiver_window.
+    /// Only advances forward (never retracts) using wrapping_sub half-range.
+    /// Zero-allocation, O(1). Called from process_sm_and_nak.
+    #[inline]
+    fn update_sender_limit_from_sm(
+        &mut self,
+        consumption_term_id: i32,
+        consumption_term_offset: i32,
+        receiver_window: i32,
+    ) {
+        let consumption_position = self.compute_position(
+            consumption_term_id,
+            consumption_term_offset as u32,
+        );
+        let proposed = consumption_position.wrapping_add(receiver_window as i64);
+        let current = match self {
+            PublicationEntry::Local { sender_limit, .. } => sender_limit,
+            PublicationEntry::Concurrent { sender_limit, .. } => sender_limit,
+        };
+        // Only advance: half-range wrapping check for i64.
+        let diff = proposed.wrapping_sub(*current);
+        if diff > 0 && diff < (i64::MAX >> 1) {
+            *current = proposed;
+        }
+    }
+
+    #[inline]
+    fn time_of_last_rttm_ns(&self) -> i64 {
+        match self {
+            PublicationEntry::Local { time_of_last_rttm_ns, .. } => *time_of_last_rttm_ns,
+            PublicationEntry::Concurrent { time_of_last_rttm_ns, .. } => *time_of_last_rttm_ns,
+        }
+    }
+
+    #[inline]
+    fn set_time_of_last_rttm_ns(&mut self, val: i64) {
+        match self {
+            PublicationEntry::Local { time_of_last_rttm_ns, .. } => *time_of_last_rttm_ns = val,
+            PublicationEntry::Concurrent { time_of_last_rttm_ns, .. } => *time_of_last_rttm_ns = val,
+        }
+    }
+
+    #[inline]
+    fn last_rtt_ns(&self) -> i64 {
+        match self {
+            PublicationEntry::Local { last_rtt_ns, .. } => *last_rtt_ns,
+            PublicationEntry::Concurrent { last_rtt_ns, .. } => *last_rtt_ns,
+        }
+    }
+
+    /// Update smoothed RTT from a new sample.
+    ///
+    /// Uses exponential moving average: srtt = srtt * 7/8 + sample * 1/8
+    /// (integer shifts, no division). Only updates if sample is positive
+    /// and within sane half-range.
+    #[inline]
+    fn update_rtt(&mut self, sample_ns: i64) {
+        if sample_ns <= 0 || sample_ns >= (i64::MAX >> 1) {
+            return;
+        }
+        let current = match self {
+            PublicationEntry::Local { last_rtt_ns, .. } => last_rtt_ns,
+            PublicationEntry::Concurrent { last_rtt_ns, .. } => last_rtt_ns,
+        };
+        if *current == 0 {
+            // First sample - use directly.
+            *current = sample_ns;
+        } else {
+            // SRTT = SRTT * 7/8 + sample * 1/8 (shift-based, no division).
+            *current = (*current - (*current >> 3)) + (sample_ns >> 3);
+        }
+    }
+
 
     /// Perform sender_scan via enum dispatch (no dyn - monomorphized paths).
     #[inline]
@@ -247,7 +347,15 @@ pub struct SenderAgent {
     duty_cycle_counter: usize,
     round_robin_index: usize,
     heartbeat_interval_ns: i64,
+    rttm_interval_ns: i64,
 }
+
+// SAFETY: SenderAgent exclusively owns all its fields including the
+// UringTransportPoller (which contains raw pointers into kernel-mapped
+// memory). The agent is single-threaded by design - it is created on one
+// thread and moved (not shared) to a dedicated agent thread via
+// AgentRunner::start(). No concurrent access occurs.
+unsafe impl Send for SenderAgent {}
 
 impl SenderAgent {
     pub fn new(ctx: &DriverContext) -> Result<Self, AgentError> {
@@ -271,6 +379,7 @@ impl SenderAgent {
             duty_cycle_counter: 0,
             round_robin_index: 0,
             heartbeat_interval_ns: ctx.heartbeat_interval_ns,
+            rttm_interval_ns: ctx.rttm_interval_ns,
         })
     }
 
@@ -305,6 +414,11 @@ impl SenderAgent {
             needs_setup: true,
             time_of_last_send_ns: 0,
             time_of_last_setup_ns: 0,
+            // Initial window: allow one full term before first SM arrives.
+            // Matches Aeron C max_flow_control on_setup: position + initial_window_length.
+            sender_limit: term_length as i64,
+            time_of_last_rttm_ns: 0,
+            last_rtt_ns: 0,
         });
         Some(idx)
     }
@@ -335,6 +449,10 @@ impl SenderAgent {
             needs_setup: true,
             time_of_last_send_ns: 0,
             time_of_last_setup_ns: 0,
+            // Initial window: allow one full term before first SM arrives.
+            sender_limit: term_length as i64,
+            time_of_last_rttm_ns: 0,
+            last_rtt_ns: 0,
         });
         Some(pub_handle)
     }
@@ -374,6 +492,7 @@ impl SenderAgent {
         let endpoints = &mut self.endpoints;
         let poller = &mut self.poller;
         let heartbeat_interval_ns = self.heartbeat_interval_ns;
+        let rttm_interval_ns = self.rttm_interval_ns;
 
         let mut idx = start;
         for _ in 0..len {
@@ -390,6 +509,7 @@ impl SenderAgent {
             let needs_setup = publications[idx].needs_setup();
             let last_setup_ns = publications[idx].time_of_last_setup_ns();
             let last_send_ns = publications[idx].time_of_last_send_ns();
+            let last_rttm_ns = publications[idx].time_of_last_rttm_ns();
             let dest_addr_copy: Option<libc::sockaddr_storage> = match &publications[idx] {
                 PublicationEntry::Local { dest_addr, .. } => *dest_addr,
                 PublicationEntry::Concurrent { dest_addr, .. } => *dest_addr,
@@ -429,22 +549,49 @@ impl SenderAgent {
                 publications[idx].set_time_of_last_send_ns(now_ns);
             }
 
+            // Send periodic RTTM request if interval has elapsed.
+            if now_ns.wrapping_sub(last_rttm_ns) > rttm_interval_ns {
+                let ep = &mut endpoints[ep_idx];
+                let _ = ep.send_rttm(
+                    poller,
+                    session_id,
+                    stream_id,
+                    now_ns,
+                    dest_addr_copy.as_ref(),
+                );
+                publications[idx].set_time_of_last_rttm_ns(now_ns);
+            }
+
             // Phase 3: Scan committed frames and send via endpoint.
             // Uses enum dispatch for sender_scan (no dyn).
+            // Flow control: clamp scan to available receiver window.
             {
                 let dest = dest_addr_copy.as_ref();
                 let pub_entry = &mut publications[idx];
                 let ep = &endpoints[ep_idx];
-                let limit = pub_entry.mtu();
 
-                let scanned = pub_entry.sender_scan(limit, |_off, data| {
-                    let _ = ep.send_data(poller, data, dest);
-                });
+                let sender_lim = pub_entry.sender_limit();
+                let sender_pos = pub_entry.sender_position();
+                let available = sender_lim.wrapping_sub(sender_pos);
 
-                if scanned > 0 {
-                    pub_entry.set_time_of_last_send_ns(now_ns);
+                let limit = if available <= 0 {
+                    0
+                } else if available >= pub_entry.mtu() as i64 {
+                    pub_entry.mtu()
+                } else {
+                    available as u32
+                };
+
+                if limit > 0 {
+                    let scanned = pub_entry.sender_scan(limit, |_off, data| {
+                        let _ = ep.send_data(poller, data, dest);
+                    });
+
+                    if scanned > 0 {
+                        pub_entry.set_time_of_last_send_ns(now_ns);
+                    }
+                    total_bytes = total_bytes.wrapping_add(scanned as i32);
                 }
-                total_bytes = total_bytes.wrapping_add(scanned as i32);
             }
 
             // Advance round-robin index (branch-based wrap, no modulo).
@@ -485,18 +632,56 @@ impl SenderAgent {
 
         for ep in endpoints.iter_mut() {
             ep.drain_sm(|sm| {
+                // Copy fields from packed struct to avoid unaligned refs.
+                let sm_session_id = sm.session_id;
+                let sm_stream_id = sm.stream_id;
+                let consumption_term_id = sm.consumption_term_id;
+                let consumption_term_offset = sm.consumption_term_offset;
+                let receiver_window = sm.receiver_window;
+
                 for pub_entry in publications.iter_mut() {
-                    if pub_entry.session_id() == sm.session_id
-                        && pub_entry.stream_id() == sm.stream_id
+                    if pub_entry.session_id() == sm_session_id
+                        && pub_entry.stream_id() == sm_stream_id
                     {
                         pub_entry.set_needs_setup(false);
-                        // Update flow control state (phase 3).
+                        pub_entry.update_sender_limit_from_sm(
+                            consumption_term_id,
+                            consumption_term_offset,
+                            receiver_window,
+                        );
                     }
                 }
             });
 
             ep.drain_naks(|nak| {
                 retransmit_handler.on_nak(nak, now_ns);
+            });
+
+            ep.drain_rttm_replies(|rttm| {
+                // Copy fields from packed struct to avoid unaligned refs.
+                let rttm_session_id = rttm.session_id;
+                let rttm_stream_id = rttm.stream_id;
+                let echo_timestamp = rttm.echo_timestamp;
+                let reception_delta = rttm.reception_delta;
+
+                let rtt_sample = now_ns
+                    .wrapping_sub(echo_timestamp)
+                    .wrapping_sub(reception_delta);
+
+                for pub_entry in publications.iter_mut() {
+                    if pub_entry.session_id() == rttm_session_id
+                        && pub_entry.stream_id() == rttm_stream_id
+                    {
+                        pub_entry.update_rtt(rtt_sample);
+                        tracing::trace!(
+                            session_id = rttm_session_id,
+                            stream_id = rttm_stream_id,
+                            rtt_sample_ns = rtt_sample,
+                            srtt_ns = pub_entry.last_rtt_ns(),
+                            "RTTM reply processed"
+                        );
+                    }
+                }
             });
         }
     }
@@ -589,3 +774,258 @@ impl Agent for SenderAgent {
         Ok(work_count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::network_publication::NetworkPublication;
+
+    const TEST_TERM_LENGTH: u32 = 1024;
+    const TEST_MTU: u32 = 1408;
+
+    fn make_local_entry(term_length: u32) -> PublicationEntry {
+        let publication = NetworkPublication::new(
+            42, 7, 0, term_length, TEST_MTU,
+        ).expect("valid params");
+        PublicationEntry::Local {
+            publication,
+            endpoint_idx: 0,
+            dest_addr: None,
+            needs_setup: true,
+            time_of_last_send_ns: 0,
+            time_of_last_setup_ns: 0,
+            sender_limit: term_length as i64,
+            time_of_last_rttm_ns: 0,
+            last_rtt_ns: 0,
+        }
+    }
+
+    // ---- sender_limit initialization ----
+
+    #[test]
+    fn sender_limit_initialized_to_term_length() {
+        let entry = make_local_entry(TEST_TERM_LENGTH);
+        assert_eq!(entry.sender_limit(), TEST_TERM_LENGTH as i64);
+    }
+
+    // ---- update_sender_limit_from_sm ----
+
+    #[test]
+    fn update_sender_limit_advances_forward() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        // Initial limit = 1024. SM says consumption at 0 + window 2048 -> 2048.
+        entry.update_sender_limit_from_sm(0, 0, 2048);
+        assert_eq!(entry.sender_limit(), 2048);
+    }
+
+    #[test]
+    fn update_sender_limit_rejects_backward() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        // Advance to 4096.
+        entry.update_sender_limit_from_sm(0, 0, 4096);
+        assert_eq!(entry.sender_limit(), 4096);
+        // SM with lower proposed limit (512) should not regress.
+        entry.update_sender_limit_from_sm(0, 0, 512);
+        assert_eq!(entry.sender_limit(), 4096);
+    }
+
+    #[test]
+    fn update_sender_limit_advances_incrementally() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        // Simulate progressive SM with advancing consumption.
+        entry.update_sender_limit_from_sm(0, 512, 1024);
+        // consumption_position = 512, proposed = 512 + 1024 = 1536.
+        assert_eq!(entry.sender_limit(), 1536);
+
+        entry.update_sender_limit_from_sm(0, 1024, 1024);
+        // proposed = 1024 + 1024 = 2048. Greater than 1536, advances.
+        assert_eq!(entry.sender_limit(), 2048);
+    }
+
+    #[test]
+    fn update_sender_limit_with_wrapping_term_id() {
+        // initial_term_id = 0, consumption at term_id=2, offset=0.
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        // consumption_position = 2 * 1024 = 2048, proposed = 2048 + 4096 = 6144.
+        entry.update_sender_limit_from_sm(2, 0, 4096);
+        assert_eq!(entry.sender_limit(), 6144);
+    }
+
+    #[test]
+    fn update_sender_limit_equal_is_noop() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        // Advance to 2048.
+        entry.update_sender_limit_from_sm(0, 0, 2048);
+        assert_eq!(entry.sender_limit(), 2048);
+        // Same value -> no change (diff = 0, not > 0).
+        entry.update_sender_limit_from_sm(0, 0, 2048);
+        assert_eq!(entry.sender_limit(), 2048);
+    }
+
+    // ---- flow control clamping in scan ----
+
+    #[test]
+    fn flow_control_allows_scan_within_limit() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        // Offer one frame.
+        match &mut entry {
+            PublicationEntry::Local { publication, .. } => {
+                publication.offer(&[0xAB; 4]).expect("offer");
+            }
+            _ => panic!("expected Local"),
+        }
+
+        // sender_limit = 1024 (term_length), sender_position = 0.
+        // available = 1024, which >= mtu -> limit = mtu.
+        let sender_lim = entry.sender_limit();
+        let sender_pos = entry.sender_position();
+        let available = sender_lim.wrapping_sub(sender_pos);
+        assert!(available > 0);
+
+        let mut count = 0u32;
+        entry.sender_scan(entry.mtu(), |_, _| count += 1);
+        assert_eq!(count, 1, "frame should be scanned when within sender_limit");
+    }
+
+    #[test]
+    fn flow_control_blocks_scan_when_at_limit() {
+        let mut entry = make_local_entry(64);
+        // Offer two frames to fill the term (64 bytes = 2 x 32-byte headers).
+        match &mut entry {
+            PublicationEntry::Local { publication, .. } => {
+                publication.offer(&[]).expect("offer 1");
+                publication.offer(&[]).expect("offer 2");
+            }
+            _ => panic!("expected Local"),
+        }
+
+        // Scan everything to advance sender_position to 64.
+        entry.sender_scan(u32::MAX, |_, _| {});
+        assert_eq!(entry.sender_position(), 64);
+
+        // sender_limit was initialized to 64 (term_length).
+        // available = 64 - 64 = 0, so scan should be blocked.
+        let available = entry.sender_limit().wrapping_sub(entry.sender_position());
+        assert_eq!(available, 0);
+    }
+
+    #[test]
+    fn flow_control_partial_window() {
+        // Set sender_limit to 48 (less than one full frame = 32 header + payload).
+        let publication = NetworkPublication::new(42, 7, 0, TEST_TERM_LENGTH, TEST_MTU)
+            .expect("valid params");
+        let mut entry = PublicationEntry::Local {
+            publication,
+            endpoint_idx: 0,
+            dest_addr: None,
+            needs_setup: true,
+            time_of_last_send_ns: 0,
+            time_of_last_setup_ns: 0,
+            sender_limit: 48, // Only 48 bytes of window.
+            time_of_last_rttm_ns: 0,
+            last_rtt_ns: 0,
+        };
+
+        // Offer a frame (32 bytes aligned).
+        match &mut entry {
+            PublicationEntry::Local { publication, .. } => {
+                publication.offer(&[]).expect("offer");
+            }
+            _ => panic!("expected Local"),
+        }
+
+        // available = 48 - 0 = 48, which < mtu (1408).
+        // Scan limit should be 48. Frame is 32 bytes, fits within 48.
+        let sender_lim = entry.sender_limit();
+        let sender_pos = entry.sender_position();
+        let available = sender_lim.wrapping_sub(sender_pos);
+        assert_eq!(available, 48);
+        let limit = if available >= entry.mtu() as i64 {
+            entry.mtu()
+        } else {
+            available as u32
+        };
+        assert_eq!(limit, 48);
+
+        let mut count = 0u32;
+        entry.sender_scan(limit, |_, _| count += 1);
+        assert_eq!(count, 1, "frame fits within partial window");
+    }
+
+    // ---- SM processing updates sender_limit ----
+
+    #[test]
+    fn sm_fields_update_sender_limit_correctly() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        // initial_term_id = 0, term_length = 1024.
+        // SM: consumption_term_id=1, consumption_term_offset=512, receiver_window=2048.
+        // consumption_position = 1*1024 + 512 = 1536.
+        // proposed = 1536 + 2048 = 3584.
+        entry.update_sender_limit_from_sm(1, 512, 2048);
+        assert_eq!(entry.sender_limit(), 3584);
+    }
+
+    // ---- RTTM / RTT tracking ----
+
+    #[test]
+    fn rtt_initialized_to_zero() {
+        let entry = make_local_entry(TEST_TERM_LENGTH);
+        assert_eq!(entry.last_rtt_ns(), 0);
+        assert_eq!(entry.time_of_last_rttm_ns(), 0);
+    }
+
+    #[test]
+    fn update_rtt_first_sample_sets_directly() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        entry.update_rtt(10_000);
+        assert_eq!(entry.last_rtt_ns(), 10_000);
+    }
+
+    #[test]
+    fn update_rtt_subsequent_uses_ewma() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        // First sample.
+        entry.update_rtt(8000);
+        assert_eq!(entry.last_rtt_ns(), 8000);
+
+        // Second sample with higher value.
+        // srtt = 8000 - (8000 >> 3) + (16000 >> 3) = 8000 - 1000 + 2000 = 9000.
+        entry.update_rtt(16000);
+        assert_eq!(entry.last_rtt_ns(), 9000);
+    }
+
+    #[test]
+    fn update_rtt_rejects_negative_sample() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        entry.update_rtt(10_000);
+        // Negative sample should be rejected.
+        entry.update_rtt(-5000);
+        assert_eq!(entry.last_rtt_ns(), 10_000);
+    }
+
+    #[test]
+    fn update_rtt_rejects_zero_sample() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        entry.update_rtt(10_000);
+        entry.update_rtt(0);
+        assert_eq!(entry.last_rtt_ns(), 10_000);
+    }
+
+    #[test]
+    fn update_rtt_rejects_huge_sample() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        entry.update_rtt(10_000);
+        // Sample beyond half-range should be rejected.
+        entry.update_rtt(i64::MAX);
+        assert_eq!(entry.last_rtt_ns(), 10_000);
+    }
+
+    #[test]
+    fn time_of_last_rttm_ns_accessors() {
+        let mut entry = make_local_entry(TEST_TERM_LENGTH);
+        assert_eq!(entry.time_of_last_rttm_ns(), 0);
+        entry.set_time_of_last_rttm_ns(999_999);
+        assert_eq!(entry.time_of_last_rttm_ns(), 999_999);
+    }
+}
+

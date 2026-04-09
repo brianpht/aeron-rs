@@ -1,10 +1,9 @@
 //! Minimal sender agent example.
 //!
 //! Constructs a `SenderAgent` with a unicast endpoint, adds one publication,
-//! and runs the duty cycle for a fixed number of iterations to demonstrate
-//! heartbeat / setup frame generation.
+//! and runs the duty cycle via `AgentRunner` with backoff idle strategy.
 //!
-//! Requires Linux with io_uring support (kernel ≥ 5.6).
+//! Requires Linux with io_uring support (kernel >= 5.6).
 //!
 //! ```sh
 //! cargo run --example send_heartbeat
@@ -12,9 +11,9 @@
 
 use std::net::SocketAddr;
 
-use aeron_rs::agent::Agent;
 use aeron_rs::context::DriverContext;
 use aeron_rs::agent::sender::SenderAgent;
+use aeron_rs::agent::runner::AgentRunner;
 use aeron_rs::media::channel::UdpChannel;
 use aeron_rs::media::send_channel_endpoint::SendChannelEndpoint;
 use aeron_rs::media::transport::UdpChannelTransport;
@@ -47,23 +46,15 @@ fn main() {
         /*mtu=*/ 1408,
     );
 
-    println!("Running sender duty cycle for 100 iterations...");
-    for i in 0..100 {
-        match agent.do_work() {
-            Ok(work) => {
-                if i % 25 == 0 {
-                    println!("  iteration {i}: work_count={work}");
-                }
-            }
-            Err(e) => {
-                eprintln!("  error at iteration {i}: {e}");
-                break;
-            }
-        }
-        // Simulate ~1 ms between duty cycle ticks.
-        std::thread::sleep(std::time::Duration::from_millis(1));
+    println!("Starting sender agent on dedicated thread (100 ms run)...");
+    let runner = AgentRunner::new(agent, ctx.idle_strategy());
+    let handle = runner.start();
+
+    // Let the agent run for 100 ms, then stop.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    match handle.join() {
+        Ok(()) => println!("Done - agent stopped cleanly"),
+        Err(e) => eprintln!("Agent error: {e}"),
     }
-
-    println!("Done ✓");
 }
-

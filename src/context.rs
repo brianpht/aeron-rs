@@ -33,6 +33,14 @@ pub enum ContextValidationError {
     TermBufferLengthInvalid,
     /// `retransmit_unicast_linger_ns` must be > 0.
     RetransmitLingerZero,
+    /// `rttm_interval_ns` must be > 0.
+    RttmIntervalZero,
+    /// `max_receiver_images` must be in [1, 256].
+    MaxReceiverImagesInvalid,
+    /// `idle_strategy_min_park_ns` must be > 0.
+    IdleMinParkZero,
+    /// `idle_strategy_max_park_ns` must be >= `idle_strategy_min_park_ns`.
+    IdleMaxParkLessThanMin,
 }
 
 impl std::fmt::Display for ContextValidationError {
@@ -59,6 +67,16 @@ impl std::fmt::Display for ContextValidationError {
             }
             Self::RetransmitLingerZero => {
                 f.write_str("retransmit_unicast_linger_ns must be > 0")
+            }
+            Self::RttmIntervalZero => f.write_str("rttm_interval_ns must be > 0"),
+            Self::MaxReceiverImagesInvalid => {
+                f.write_str("max_receiver_images must be in [1, 256]")
+            }
+            Self::IdleMinParkZero => {
+                f.write_str("idle_strategy_min_park_ns must be > 0")
+            }
+            Self::IdleMaxParkLessThanMin => {
+                f.write_str("idle_strategy_max_park_ns must be >= min_park_ns")
             }
         }
     }
@@ -97,10 +115,25 @@ pub struct DriverContext {
     pub sm_interval_ns: i64,
     pub nak_delay_ns: i64,
     pub rttm_interval_ns: i64,
+    /// Maximum number of receiver images (active subscriptions).
+    /// Bounds memory: each image allocates a RawLog (4 * term_length bytes).
+    /// Must be in [1, 256]. Default: 256.
+    pub max_receiver_images: usize,
 
     // ── General ──
     pub driver_timeout_ns: i64,
     pub timer_interval_ns: i64,
+
+    // ── Idle strategy ──
+    /// Maximum spin iterations before yielding. Default: 10.
+    pub idle_strategy_max_spins: u64,
+    /// Maximum yield iterations before parking. Default: 5.
+    pub idle_strategy_max_yields: u64,
+    /// Minimum park duration in nanoseconds. Default: 1_000 (1 us).
+    pub idle_strategy_min_park_ns: u64,
+    /// Maximum park duration in nanoseconds. Default: 1_000_000 (1 ms).
+    /// Must be >= min_park_ns.
+    pub idle_strategy_max_park_ns: u64,
 }
 
 impl Default for DriverContext {
@@ -127,9 +160,15 @@ impl Default for DriverContext {
             sm_interval_ns: Duration::from_millis(200).as_nanos() as i64,
             nak_delay_ns: Duration::from_millis(60).as_nanos() as i64,
             rttm_interval_ns: Duration::from_secs(1).as_nanos() as i64,
+            max_receiver_images: 256,
 
             driver_timeout_ns: Duration::from_secs(10).as_nanos() as i64,
             timer_interval_ns: Duration::from_millis(1).as_nanos() as i64,
+
+            idle_strategy_max_spins: 10,
+            idle_strategy_max_yields: 5,
+            idle_strategy_min_park_ns: 1_000,       // 1 us
+            idle_strategy_max_park_ns: 1_000_000,   // 1 ms
         }
     }
 }
@@ -183,7 +222,29 @@ impl DriverContext {
         if self.retransmit_unicast_linger_ns <= 0 {
             return Err(ContextValidationError::RetransmitLingerZero);
         }
+        if self.rttm_interval_ns <= 0 {
+            return Err(ContextValidationError::RttmIntervalZero);
+        }
+        if self.max_receiver_images == 0 || self.max_receiver_images > 256 {
+            return Err(ContextValidationError::MaxReceiverImagesInvalid);
+        }
+        if self.idle_strategy_min_park_ns == 0 {
+            return Err(ContextValidationError::IdleMinParkZero);
+        }
+        if self.idle_strategy_max_park_ns < self.idle_strategy_min_park_ns {
+            return Err(ContextValidationError::IdleMaxParkLessThanMin);
+        }
         Ok(())
+    }
+
+    /// Build an `IdleStrategy::Backoff` from the configured parameters.
+    pub fn idle_strategy(&self) -> crate::agent::idle_strategy::IdleStrategy {
+        crate::agent::idle_strategy::IdleStrategy::Backoff {
+            max_spins: self.idle_strategy_max_spins,
+            max_yields: self.idle_strategy_max_yields,
+            min_park_ns: self.idle_strategy_min_park_ns,
+            max_park_ns: self.idle_strategy_max_park_ns,
+        }
     }
 }
 
@@ -234,6 +295,7 @@ mod tests {
         assert_eq!(ctx.sm_interval_ns, Duration::from_millis(200).as_nanos() as i64);
         assert_eq!(ctx.nak_delay_ns, Duration::from_millis(60).as_nanos() as i64);
         assert_eq!(ctx.rttm_interval_ns, Duration::from_secs(1).as_nanos() as i64);
+        assert_eq!(ctx.max_receiver_images, 256);
     }
 
     #[test]
@@ -409,9 +471,103 @@ mod tests {
     }
 
     #[test]
+    fn validate_rttm_interval_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.rttm_interval_ns = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::RttmIntervalZero));
+    }
+
+    #[test]
+    fn validate_rttm_interval_negative() {
+        let mut ctx = DriverContext::default();
+        ctx.rttm_interval_ns = -1;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::RttmIntervalZero));
+    }
+
+    #[test]
+    fn validate_max_receiver_images_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.max_receiver_images = 0;
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::MaxReceiverImagesInvalid),
+        );
+    }
+
+    #[test]
+    fn validate_max_receiver_images_too_large() {
+        let mut ctx = DriverContext::default();
+        ctx.max_receiver_images = 257;
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::MaxReceiverImagesInvalid),
+        );
+    }
+
+    #[test]
+    fn validate_max_receiver_images_boundary() {
+        let mut ctx = DriverContext::default();
+        ctx.max_receiver_images = 1;
+        assert!(ctx.validate().is_ok());
+        ctx.max_receiver_images = 256;
+        assert!(ctx.validate().is_ok());
+    }
+
+    #[test]
     fn validation_error_display() {
         let e = ContextValidationError::RingSizeNotPowerOfTwo;
         let s = e.to_string();
         assert!(s.contains("power-of-two"));
+    }
+
+    // ── Idle strategy validation ──
+
+    #[test]
+    fn default_idle_strategy_params() {
+        let ctx = DriverContext::default();
+        assert_eq!(ctx.idle_strategy_max_spins, 10);
+        assert_eq!(ctx.idle_strategy_max_yields, 5);
+        assert_eq!(ctx.idle_strategy_min_park_ns, 1_000);
+        assert_eq!(ctx.idle_strategy_max_park_ns, 1_000_000);
+    }
+
+    #[test]
+    fn validate_idle_min_park_zero() {
+        let mut ctx = DriverContext::default();
+        ctx.idle_strategy_min_park_ns = 0;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::IdleMinParkZero));
+    }
+
+    #[test]
+    fn validate_idle_max_park_less_than_min() {
+        let mut ctx = DriverContext::default();
+        ctx.idle_strategy_min_park_ns = 1000;
+        ctx.idle_strategy_max_park_ns = 500;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::IdleMaxParkLessThanMin));
+    }
+
+    #[test]
+    fn validate_idle_max_park_equal_to_min_ok() {
+        let mut ctx = DriverContext::default();
+        ctx.idle_strategy_min_park_ns = 1000;
+        ctx.idle_strategy_max_park_ns = 1000;
+        assert!(ctx.validate().is_ok());
+    }
+
+    #[test]
+    fn idle_strategy_from_context() {
+        let ctx = DriverContext::default();
+        let strategy = ctx.idle_strategy();
+        match strategy {
+            crate::agent::idle_strategy::IdleStrategy::Backoff {
+                max_spins, max_yields, min_park_ns, max_park_ns,
+            } => {
+                assert_eq!(max_spins, 10);
+                assert_eq!(max_yields, 5);
+                assert_eq!(min_park_ns, 1_000);
+                assert_eq!(max_park_ns, 1_000_000);
+            }
+            _ => panic!("expected Backoff variant"),
+        }
     }
 }

@@ -3,6 +3,7 @@ pub mod clock;
 pub mod context;
 pub mod media;
 pub mod agent;
+pub mod cnc;
 
 #[cfg(test)]
 mod tests {

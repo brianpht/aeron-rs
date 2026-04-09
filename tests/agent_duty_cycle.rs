@@ -13,6 +13,8 @@ mod agent_duty_cycle {
     use aeron_rs::agent::receiver::ReceiverAgent;
     use aeron_rs::agent::sender::SenderAgent;
     use aeron_rs::context::DriverContext;
+    use aeron_rs::agent::runner::AgentRunner;
+    use aeron_rs::agent::idle_strategy::IdleStrategy;
     use aeron_rs::media::channel::UdpChannel;
     use aeron_rs::media::receive_channel_endpoint::ReceiveChannelEndpoint;
     use aeron_rs::media::send_channel_endpoint::SendChannelEndpoint;
@@ -155,7 +157,7 @@ mod agent_duty_cycle {
             UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
                 .expect("transport open");
 
-        let endpoint = ReceiveChannelEndpoint::new(channel, transport);
+        let endpoint = ReceiveChannelEndpoint::new(channel, transport, 0);
         let mut agent = ReceiverAgent::new(&ctx).expect("receiver agent");
         let _ep_idx = agent.add_endpoint(endpoint).expect("add endpoint");
 
@@ -175,6 +177,62 @@ mod agent_duty_cycle {
         let mut receiver = ReceiverAgent::new(&ctx).expect("receiver");
         assert!(receiver.on_start().is_ok());
         assert!(receiver.on_close().is_ok());
+    }
+
+    // ── AgentRunner integration tests ──
+
+    #[test]
+    fn agent_runner_sender_thread_lifecycle() {
+        let ctx = DriverContext::default();
+        let agent = SenderAgent::new(&ctx).expect("sender agent");
+        let runner = AgentRunner::new(agent, ctx.idle_strategy());
+        let handle = runner.start();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let result = handle.join();
+        assert!(result.is_ok(), "sender agent runner should stop cleanly");
+    }
+
+    #[test]
+    fn agent_runner_receiver_thread_lifecycle() {
+        let ctx = DriverContext::default();
+        let agent = ReceiverAgent::new(&ctx).expect("receiver agent");
+        let runner = AgentRunner::new(agent, ctx.idle_strategy());
+        let handle = runner.start();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let result = handle.join();
+        assert!(result.is_ok(), "receiver agent runner should stop cleanly");
+    }
+
+    #[test]
+    fn agent_runner_noop_strategy() {
+        let ctx = DriverContext::default();
+        let agent = SenderAgent::new(&ctx).expect("sender agent");
+        let runner = AgentRunner::new(agent, IdleStrategy::Noop);
+        let handle = runner.start();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let result = handle.join();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn agent_runner_stop_handle() {
+        let ctx = DriverContext::default();
+        let agent = SenderAgent::new(&ctx).expect("sender agent");
+        let runner = AgentRunner::new(agent, ctx.idle_strategy());
+        let stop = runner.stop_handle();
+        let handle = runner.start();
+
+        // Stop via the separate stop handle.
+        stop.stop();
+
+        let result = handle.join();
+        assert!(result.is_ok());
     }
 }
 

@@ -18,6 +18,8 @@ The entire I/O path runs through `io_uring` with multishot receive and provided 
 - **Sub-Microsecond Offer Path**: ~8 ns from frame build to SQE push (userspace)
 - **High Throughput**: >= 3 M msg/s with 1408-byte frames on commodity hardware
 - **Cache-Oriented**: 64-byte aligned slots, stack-local CQE batching, flat-array dispatch
+- **CnC IPC**: mmap'd Command-and-Control file with MPSC ring buffer + broadcast for multi-process driver control
+- **3-Thread Conductor**: Conductor, Sender, Receiver agents on dedicated threads with lock-free SPSC command queues
 
 ## Requirements
 
@@ -97,7 +99,7 @@ let transport = UdpChannelTransport::open(
     &channel, &local, &channel.remote_data, &ctx,
 ).expect("transport open");
 
-let endpoint = ReceiveChannelEndpoint::new(channel, transport);
+let endpoint = ReceiveChannelEndpoint::new(channel, transport, 0);
 let mut agent = ReceiverAgent::new(&ctx).expect("receiver agent");
 agent.add_endpoint(endpoint).expect("add endpoint");
 
@@ -323,7 +325,16 @@ src/
 ├── agent/
 │   ├── mod.rs                      # Agent trait (do_work / on_start / on_close)
 │   ├── sender.rs                   # SenderAgent - heartbeat, setup, data send
-│   └── receiver.rs                 # ReceiverAgent - data dispatch, SM/NAK generation
+│   ├── receiver.rs                 # ReceiverAgent - data dispatch, SM/NAK generation
+│   ├── conductor.rs                # ConductorAgent - CnC command dispatch, 3-thread model
+│   ├── idle_strategy.rs            # BusySpin, Noop, Sleeping, Backoff strategies
+│   └── runner.rs                   # AgentRunner - threaded + sync agent lifecycle
+├── cnc/
+│   ├── mod.rs                      # CnC module exports
+│   ├── ring_buffer.rs              # MPSC ring buffer (client -> driver commands)
+│   ├── broadcast.rs                # Broadcast buffer (driver -> client responses)
+│   ├── command.rs                  # Command/response protocol (fixed-size, le-bytes)
+│   └── cnc_file.rs                 # CnC mmap file (DriverCnc + ClientCnc)
 └── media/
     ├── mod.rs                      # Media layer module exports
     ├── channel.rs                  # Aeron URI parsing (aeron:udp?endpoint=...)

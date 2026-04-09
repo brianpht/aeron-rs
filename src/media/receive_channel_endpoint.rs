@@ -11,6 +11,7 @@ use super::transport::UdpChannelTransport;
 // ── Pre-sized capacity for pending control messages ──
 const MAX_PENDING_SM: usize = 64;
 const MAX_PENDING_NAK: usize = 64;
+const MAX_PENDING_RTTM: usize = 16;
 
 /// Pending status message to send.
 #[derive(Clone, Copy)]
@@ -35,6 +36,16 @@ pub struct PendingNak {
     pub length: i32,
 }
 
+/// Pending RTTM echo reply to send.
+#[derive(Clone, Copy)]
+pub struct PendingRttm {
+    pub dest_addr: libc::sockaddr_storage,
+    pub session_id: i32,
+    pub stream_id: i32,
+    pub echo_timestamp: i64,
+    pub receiver_id: i64,
+}
+
 /// Callback for data frames received on this endpoint.
 pub trait DataFrameHandler {
     fn on_data(
@@ -57,30 +68,41 @@ pub struct ReceiveChannelEndpoint {
     pub channel: UdpChannel,
     pub transport: UdpChannelTransport,
     pub transport_idx: Option<usize>,
+    /// Receiver ID for RTTM echo replies.
+    receiver_id: i64,
     /// Pre-sized flat array for pending SMs - no allocation in steady state.
     pending_sms: [PendingSm; MAX_PENDING_SM],
     pending_sms_len: usize,
     /// Pre-sized flat array for pending NAKs - no allocation in steady state.
     pending_naks: [PendingNak; MAX_PENDING_NAK],
     pending_naks_len: usize,
+    /// Pre-sized flat array for pending RTTM echo replies.
+    pending_rttms: [PendingRttm; MAX_PENDING_RTTM],
+    pending_rttms_len: usize,
     /// Scratch buffer for SM frames.
     sm_buf: [u8; SM_TOTAL_LENGTH],
     /// Scratch buffer for NAK frames.
     nak_buf: [u8; NAK_TOTAL_LENGTH],
+    /// Scratch buffer for RTTM frames.
+    rttm_buf: [u8; RTTM_TOTAL_LENGTH],
 }
 
 impl ReceiveChannelEndpoint {
-    pub fn new(channel: UdpChannel, transport: UdpChannelTransport) -> Self {
+    pub fn new(channel: UdpChannel, transport: UdpChannelTransport, receiver_id: i64) -> Self {
         Self {
             channel,
             transport,
             transport_idx: None,
+            receiver_id,
             pending_sms: [unsafe { std::mem::zeroed() }; MAX_PENDING_SM],
             pending_sms_len: 0,
             pending_naks: [unsafe { std::mem::zeroed() }; MAX_PENDING_NAK],
             pending_naks_len: 0,
+            pending_rttms: [unsafe { std::mem::zeroed() }; MAX_PENDING_RTTM],
+            pending_rttms_len: 0,
             sm_buf: [0u8; SM_TOTAL_LENGTH],
             nak_buf: [0u8; NAK_TOTAL_LENGTH],
+            rttm_buf: [0u8; RTTM_TOTAL_LENGTH],
         }
     }
 
@@ -93,7 +115,7 @@ impl ReceiveChannelEndpoint {
 
     /// Dispatch an incoming message. Returns true if handled.
     pub fn on_message(
-        &self,
+        &mut self,
         data: &[u8],
         source: &libc::sockaddr_storage,
         handler: &mut impl DataFrameHandler,
@@ -117,7 +139,19 @@ impl ReceiveChannelEndpoint {
                 }
             }
             FrameType::Rttm => {
-                // RTTM processing (phase 3).
+                if let Some(rttm) = RttmHeader::parse(data) {
+                    let flags = { rttm.frame_header.flags };
+                    // Ignore RTTM replies (already echoed) - only echo requests.
+                    if (flags & RTTM_FLAG_REPLY) == 0 {
+                        self.queue_rttm(PendingRttm {
+                            dest_addr: *source,
+                            session_id: { rttm.session_id },
+                            stream_id: { rttm.stream_id },
+                            echo_timestamp: { rttm.echo_timestamp },
+                            receiver_id: self.receiver_id,
+                        });
+                    }
+                }
                 return true;
             }
             _ => {}
@@ -139,6 +173,14 @@ impl ReceiveChannelEndpoint {
         if self.pending_naks_len < MAX_PENDING_NAK {
             self.pending_naks[self.pending_naks_len] = nak;
             self.pending_naks_len += 1;
+        }
+    }
+
+    /// Queue an RTTM echo reply (zero-allocation, drops on overflow).
+    pub fn queue_rttm(&mut self, rttm: PendingRttm) {
+        if self.pending_rttms_len < MAX_PENDING_RTTM {
+            self.pending_rttms[self.pending_rttms_len] = rttm;
+            self.pending_rttms_len += 1;
         }
     }
 
@@ -197,6 +239,28 @@ impl ReceiveChannelEndpoint {
         }
         self.pending_naks_len = 0;
 
+        // Send RTTM echo replies.
+        for i in 0..self.pending_rttms_len {
+            let pending = self.pending_rttms[i];
+            let rttm = RttmHeader {
+                frame_header: FrameHeader {
+                    frame_length: RTTM_TOTAL_LENGTH as i32,
+                    version: CURRENT_VERSION,
+                    flags: RTTM_FLAG_REPLY,
+                    frame_type: FRAME_TYPE_RTTM,
+                },
+                session_id: pending.session_id,
+                stream_id: pending.stream_id,
+                echo_timestamp: pending.echo_timestamp,
+                reception_delta: 0, // v1: no queueing delay tracking
+                receiver_id: pending.receiver_id,
+            };
+            rttm.write(&mut self.rttm_buf);
+            poller.submit_send(idx, &self.rttm_buf, Some(&pending.dest_addr))?;
+            count += 1;
+        }
+        self.pending_rttms_len = 0;
+
         Ok(count)
     }
 }
@@ -215,7 +279,7 @@ mod tests {
         let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let remote = channel.remote_data;
         let transport = UdpChannelTransport::open(&channel, &local, &remote, &ctx).unwrap();
-        ReceiveChannelEndpoint::new(channel, transport)
+        ReceiveChannelEndpoint::new(channel, transport, 0xBEEF)
     }
 
     fn make_pending_sm(session_id: i32, stream_id: i32) -> PendingSm {
@@ -311,7 +375,7 @@ mod tests {
 
     #[test]
     fn on_message_dispatches_data_frame() {
-        let ep = dummy_endpoint();
+        let mut ep = dummy_endpoint();
         let source: libc::sockaddr_storage = unsafe { mem::zeroed() };
 
         let data = DataHeader {
@@ -345,7 +409,7 @@ mod tests {
 
     #[test]
     fn on_message_dispatches_setup_frame() {
-        let ep = dummy_endpoint();
+        let mut ep = dummy_endpoint();
         let source: libc::sockaddr_storage = unsafe { mem::zeroed() };
 
         let setup = SetupHeader {
@@ -376,11 +440,89 @@ mod tests {
 
     #[test]
     fn on_message_short_buffer_returns_false() {
-        let ep = dummy_endpoint();
+        let mut ep = dummy_endpoint();
         let source: libc::sockaddr_storage = unsafe { mem::zeroed() };
         let mut handler = StubHandler::new();
         let handled = ep.on_message(&[0u8; 4], &source, &mut handler);
         assert!(!handled);
         assert_eq!(handler.data_count, 0);
+    }
+
+    // ── RTTM echo tests ──
+
+    fn build_rttm_request(session_id: i32, stream_id: i32, echo_ts: i64) -> [u8; RTTM_TOTAL_LENGTH] {
+        let rttm = RttmHeader {
+            frame_header: FrameHeader {
+                frame_length: RTTM_TOTAL_LENGTH as i32,
+                version: CURRENT_VERSION,
+                flags: 0, // request
+                frame_type: FRAME_TYPE_RTTM,
+            },
+            session_id,
+            stream_id,
+            echo_timestamp: echo_ts,
+            reception_delta: 0,
+            receiver_id: 0,
+        };
+        let mut buf = [0u8; RTTM_TOTAL_LENGTH];
+        rttm.write(&mut buf);
+        buf
+    }
+
+    fn build_rttm_reply(session_id: i32, stream_id: i32, echo_ts: i64) -> [u8; RTTM_TOTAL_LENGTH] {
+        let rttm = RttmHeader {
+            frame_header: FrameHeader {
+                frame_length: RTTM_TOTAL_LENGTH as i32,
+                version: CURRENT_VERSION,
+                flags: RTTM_FLAG_REPLY, // reply
+                frame_type: FRAME_TYPE_RTTM,
+            },
+            session_id,
+            stream_id,
+            echo_timestamp: echo_ts,
+            reception_delta: 0,
+            receiver_id: 0xCAFE,
+        };
+        let mut buf = [0u8; RTTM_TOTAL_LENGTH];
+        rttm.write(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn rttm_request_triggers_echo_queue() {
+        let mut ep = dummy_endpoint();
+        let source: libc::sockaddr_storage = unsafe { mem::zeroed() };
+        let mut handler = StubHandler::new();
+        let buf = build_rttm_request(42, 7, 123_456_789);
+        let handled = ep.on_message(&buf, &source, &mut handler);
+        assert!(handled);
+        assert_eq!(ep.pending_rttms_len, 1);
+        assert_eq!(ep.pending_rttms[0].session_id, 42);
+        assert_eq!(ep.pending_rttms[0].stream_id, 7);
+        assert_eq!(ep.pending_rttms[0].echo_timestamp, 123_456_789);
+        assert_eq!(ep.pending_rttms[0].receiver_id, 0xBEEF);
+    }
+
+    #[test]
+    fn rttm_reply_is_ignored() {
+        let mut ep = dummy_endpoint();
+        let source: libc::sockaddr_storage = unsafe { mem::zeroed() };
+        let mut handler = StubHandler::new();
+        let buf = build_rttm_reply(42, 7, 999);
+        let handled = ep.on_message(&buf, &source, &mut handler);
+        assert!(handled);
+        assert_eq!(ep.pending_rttms_len, 0, "reply should not be echoed");
+    }
+
+    #[test]
+    fn rttm_queue_overflow_drops() {
+        let mut ep = dummy_endpoint();
+        let source: libc::sockaddr_storage = unsafe { mem::zeroed() };
+        let mut handler = StubHandler::new();
+        for i in 0..(MAX_PENDING_RTTM + 5) {
+            let buf = build_rttm_request(i as i32, 1, i as i64);
+            ep.on_message(&buf, &source, &mut handler);
+        }
+        assert_eq!(ep.pending_rttms_len, MAX_PENDING_RTTM);
     }
 }

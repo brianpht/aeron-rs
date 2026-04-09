@@ -45,6 +45,8 @@ pub const SM_FLAG_SETUP: u8 = 0x80;
 
 pub const SETUP_FLAG_RESPONSE: u8 = 0x80;
 
+pub const RTTM_FLAG_REPLY: u8 = 0x80;
+
 // ──────────────────────────── Frame Header ────────────────────────────
 
 /// Common 8-byte frame header for all Aeron protocol messages.
