@@ -75,7 +75,8 @@ Originally 7 `#[allow(dead_code)]` annotations. 2 resolved, 5 remaining:
 | Command protocol | `cnc/command.rs` - AddPublication, AddSubscription, responses, le-bytes codec | Done |
 | CnC file | `cnc/cnc_file.rs` - mmap layout, DriverCnc, ClientCnc, heartbeat | Done |
 | Conductor agent | `agent/conductor.rs` - CnC command dispatch, SPSC to sender/receiver, 3-thread model | Done |
-| Client IPC | (none) - client library (Aeron::connect, Publication, Subscription handles) | Not started |
+| CnC infrastructure | `cnc/` - mmap file, MPSC ring buffer, broadcast, command protocol | Done |
+| Client library | (none) - Aeron::connect, Publication, Subscription handles over CnC | Not started |
 
 ## Decisions Made
 

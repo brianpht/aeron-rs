@@ -2,8 +2,8 @@
 
 > **Zero-copy, io_uring-native Aeron media driver in Rust.**
 >
-> [!] If a change triggers allocation in steady state, moves a pinned buffer, or adds a syscall in the duty cycle - *
-*REJECT**.
+> [!] If a change triggers allocation in steady state, moves a pinned buffer, or adds a syscall in the duty cycle -
+> **REJECT**.
 
 ---
 
@@ -28,6 +28,7 @@
     - [12. Dispatch & Polymorphism](#12-dispatch--polymorphism)
     - [13. Unsafe Policy](#13-unsafe-policy)
     - [14. Performance Budget](#14-performance-budget)
+    - [15. Term Buffer & Publication Layer](#15-term-buffer--publication-layer)
 - [Architecture Overview](#architecture-overview)
 - [Final Principle](#final-principle)
 
@@ -407,8 +408,8 @@ fn is_past(proposed: i32, current: i32) -> bool {
 
 // [PASS] CORRECT - gap detection in receiver image
 let gap = received_offset.wrapping_sub(expected_offset);
-if gap > 0 & & gap < (i32::MAX / 2) {
-// gap detected - schedule NAK
+if gap > 0 && gap < (i32::MAX / 2) {
+    // gap detected - schedule NAK
 }
 
 // [FAIL] FORBIDDEN
@@ -448,8 +449,8 @@ let index = offset % capacity;
 ```rust
 // [PASS] CORRECT - branch-based wrap
 idx += 1;
-if idx > = len {
-idx = 0;
+if idx >= len {
+    idx = 0;
 }
 
 // [FAIL] FORBIDDEN
@@ -645,6 +646,76 @@ p99 > p50 x 2       - investigate tail latency
 any allocation       - reject (use heaptrack / DHAT to verify)
 new syscall          - reject (use strace to verify)
 ```
+
+---
+
+### 15. Term Buffer & Publication Layer
+
+The term buffer and publication subsystem bridges application `offer()` calls with the io_uring send path.
+All indexing uses bitmask arithmetic per [ADR-001](decisions/ADR-001-four-term-partitions.md).
+
+#### 4-Partition Layout (ADR-001)
+
+Aeron uses 3 term partitions with `% 3` rotation. This project uses **4 partitions** with `& 3` bitmask
+indexing to comply with the no-modulo rule. 33% more memory per publication; single AND instruction per
+index computation.
+
+```
+partition_index = (active_term_id.wrapping_sub(initial_term_id) as u32) & 3
+```
+
+```rust
+pub const PARTITION_COUNT: usize = 4;
+const _: () = assert!(PARTITION_COUNT.is_power_of_two());  // compile-time guard
+```
+
+#### RawLog (term_buffer.rs)
+
+Single `Vec<u8>` allocated once at construction (`PARTITION_COUNT * term_length` bytes). Never resized.
+Provides `append_frame`, `scan_frames`, `clean_partition` - all zero-allocation, O(1) per frame.
+
+#### NetworkPublication (network_publication.rs)
+
+Owns a `RawLog`. Tracks `active_term_id`, `term_offset`, `pub_position`, `sender_position`.
+
+| Method | Hot Path | Description |
+|--------|----------|-------------|
+| `offer(&mut self, payload)` | Yes | Append frame, advance position, rotate term on fill |
+| `sender_scan(&mut self, limit, emit)` | Yes | Walk committed frames from sender_position |
+| `rotate_term()` | Infrequent | Increment term_id, clean entering partition |
+
+Back-pressure: `pub_position - sender_position >= (PARTITION_COUNT - 1) * term_length` blocks the publisher.
+Clean-entering-partition strategy on rotation (not "3 ahead") - avoids destroying unscanned sender data.
+
+#### ConcurrentPublication (concurrent_publication.rs)
+
+Cross-thread variant. `Arc<PublicationInner>` shared between a publisher thread (`ConcurrentPublication`)
+and the sender thread (`SenderPublication`). Coordinated via Release/Acquire atomics:
+
+| Atomic | Writer | Reader | Ordering |
+|--------|--------|--------|----------|
+| `frame_length` (in-buffer) | Publisher | Sender | Release / Acquire |
+| `pub_position` | Publisher | External | Release / Acquire |
+| `sender_position` | Sender | Publisher | Release / Acquire |
+
+No Mutex. No SeqCst. The `frame_length` word at the start of each frame serves as the publish barrier -
+matching Aeron Java's `putOrdered` / `getVolatile` pattern.
+
+#### RetransmitHandler (retransmit_handler.rs)
+
+Pre-sized `[RetransmitAction; 64]` flat array (~2.5 KiB, L1-resident). NAK-driven Delay/Linger state
+machine. Zero allocation. Linear scan for dedup (acceptable for n <= 64).
+
+NAK range validation: `nak_position >= sender_position - (PARTITION_COUNT - 1) * term_length`.
+Positions outside the buffer window are rejected.
+
+| Rule | Status |
+|------|--------|
+| Bitmask partition index (`& 3`) on every offer/scan | Required |
+| Back-pressure check before every append | Required |
+| Clean entering partition on rotation (not N-1 ahead) | Required |
+| Atomic frame-length commit (Release/Acquire) for cross-thread | Required |
+| No allocation in offer/scan/retransmit paths | Required |
 
 ---
 

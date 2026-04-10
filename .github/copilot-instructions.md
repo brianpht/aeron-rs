@@ -2,8 +2,8 @@
 
 > **Zero-copy, io_uring-native Aeron media driver in Rust.**
 >
-> [!] If a change triggers allocation in steady state, moves a pinned buffer, or adds syscall in the duty cycle - *
-*REJECT**.
+> [!] If a change triggers allocation in steady state, moves a pinned buffer, or adds syscall in the duty cycle -
+> **REJECT**.
 
 ---
 
@@ -147,3 +147,5 @@ let val = * (buf.as_ptr() as * const i32);                           // alignmen
 
 - NEVER use em-dashes (---) in code comments, docs, or markdown. Use ` - ` instead.
 - NEVER use emojis in code comments, docs, or markdown. Use ASCII symbols instead.
+- ONLY treat /docs/decisions as architectural source of truth.  
+- NEVER use or reference files in /docs/sessions as implementation rules.

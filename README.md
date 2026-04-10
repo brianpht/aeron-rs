@@ -342,6 +342,10 @@ src/
     ├── poller.rs                   # TransportPoller trait + PollError
     ├── uring_poller.rs             # io_uring implementation (multishot + buf_ring)
     ├── buffer_pool.rs              # SlotPool (pinned send/recv slots)
+    ├── term_buffer.rs              # RawLog + SharedLogBuffer (4 partitions, ADR-001)
+    ├── network_publication.rs      # NetworkPublication (offer, sender_scan, rotation)
+    ├── concurrent_publication.rs   # Cross-thread offer/scan (atomic frame-length commit)
+    ├── retransmit_handler.rs       # NAK-driven retransmit scheduler (flat array)
     ├── send_channel_endpoint.rs    # Send endpoint (heartbeat, setup, SM/NAK ingest)
     └── receive_channel_endpoint.rs # Recv endpoint (data dispatch, SM/NAK generation)
 ```

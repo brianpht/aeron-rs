@@ -3,8 +3,6 @@
 **Date:** YYYY-MM-DD  
 **Status:** Proposed | Accepted | Deprecated | Superseded by [ADR-XXX](…)  
 **Deciders:** {developer | team}  
-**Related Tasks:** [TASK-XXX](…)  
-**Related Sessions:** [Session YYYY-MM-DD](…)
 
 ## Context
 
