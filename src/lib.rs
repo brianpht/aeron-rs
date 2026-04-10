@@ -4,6 +4,7 @@ pub mod context;
 pub mod media;
 pub mod agent;
 pub mod cnc;
+pub mod client;
 
 #[cfg(test)]
 mod tests {

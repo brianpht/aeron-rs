@@ -1,8 +1,11 @@
 // The Sender Agent - owns the send-side io_uring poller and all
 // SendChannelEndpoints. Mirrors aeron_driver_sender_t.
 
+use std::sync::Arc;
+
 use super::{Agent, AgentError};
 use crate::clock::CachedNanoClock;
+use crate::client::bridge::PublicationBridge;
 
 use crate::context::DriverContext;
 use crate::media::concurrent_publication::{
@@ -348,6 +351,10 @@ pub struct SenderAgent {
     round_robin_index: usize,
     heartbeat_interval_ns: i64,
     rttm_interval_ns: i64,
+    /// Publication bridge for receiving concurrent publications from the
+    /// Aeron client. None when no client is connected.
+    /// Scanned per duty cycle: O(BRIDGE_CAPACITY) Acquire loads when empty.
+    pub_bridge: Option<Arc<PublicationBridge>>,
 }
 
 // SAFETY: SenderAgent exclusively owns all its fields including the
@@ -380,7 +387,14 @@ impl SenderAgent {
             round_robin_index: 0,
             heartbeat_interval_ns: ctx.heartbeat_interval_ns,
             rttm_interval_ns: ctx.rttm_interval_ns,
+            pub_bridge: None,
         })
+    }
+
+    /// Set the publication bridge for receiving concurrent publications
+    /// from the Aeron client. Call before starting the agent.
+    pub(crate) fn set_publication_bridge(&mut self, bridge: Arc<PublicationBridge>) {
+        self.pub_bridge = Some(bridge);
     }
 
     /// Add an endpoint and register it with the poller.
@@ -746,6 +760,65 @@ impl SenderAgent {
         }
         work_count
     }
+
+    /// Poll the publication bridge for new concurrent publications
+    /// deposited by the Aeron client.
+    ///
+    /// For each pending publication: register the endpoint with the
+    /// poller, add the SenderPublication as a Concurrent entry.
+    ///
+    /// Cold-path per item (socket registration, Vec push). The scan
+    /// itself is O(BRIDGE_CAPACITY) Acquire loads when empty.
+    fn poll_publication_bridge(&mut self) -> i32 {
+        let Some(ref bridge) = self.pub_bridge else {
+            return 0;
+        };
+
+        let cap = bridge.capacity();
+        let mut count = 0i32;
+
+        for i in 0..cap {
+            // Scope the borrow of self.pub_bridge to the try_take call.
+            // After this block, the borrow is released and we can use &mut self.
+            let item = {
+                let Some(ref bridge) = self.pub_bridge else {
+                    break;
+                };
+                bridge.try_take(i)
+            };
+
+            if let Some(pending) = item {
+                // Register endpoint with the poller (cold path - involves io_uring SQE).
+                let mut endpoint = pending.endpoint;
+                let register_result = endpoint.register(&mut self.poller);
+                if register_result.is_err() {
+                    tracing::warn!("failed to register endpoint from bridge");
+                    continue;
+                }
+
+                let ep_idx = self.endpoints.len();
+                self.endpoints.push(endpoint);
+
+                let term_length = pending.sender_pub.term_length();
+
+                self.publications.push(PublicationEntry::Concurrent {
+                    sender_pub: pending.sender_pub,
+                    endpoint_idx: ep_idx,
+                    dest_addr: Some(pending.dest_addr),
+                    needs_setup: true,
+                    time_of_last_send_ns: 0,
+                    time_of_last_setup_ns: 0,
+                    sender_limit: term_length as i64,
+                    time_of_last_rttm_ns: 0,
+                    last_rtt_ns: 0,
+                });
+
+                count += 1;
+            }
+        }
+
+        count
+    }
 }
 
 impl Agent for SenderAgent {
@@ -763,6 +836,7 @@ impl Agent for SenderAgent {
         // Step 2: Poll for incoming SM / NAK / ERR.
         if bytes_sent == 0 || self.duty_cycle_counter >= self.duty_cycle_ratio {
             work_count += self.poll_control();
+            work_count += self.poll_publication_bridge();
             self.process_sm_and_nak(now_ns);
             work_count += self.do_retransmit(now_ns);
             self.duty_cycle_counter = 0;

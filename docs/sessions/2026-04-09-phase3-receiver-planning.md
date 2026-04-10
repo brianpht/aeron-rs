@@ -76,7 +76,7 @@ Originally 7 `#[allow(dead_code)]` annotations. 2 resolved, 5 remaining:
 | CnC file | `cnc/cnc_file.rs` - mmap layout, DriverCnc, ClientCnc, heartbeat | Done |
 | Conductor agent | `agent/conductor.rs` - CnC command dispatch, SPSC to sender/receiver, 3-thread model | Done |
 | CnC infrastructure | `cnc/` - mmap file, MPSC ring buffer, broadcast, command protocol | Done |
-| Client library | (none) - Aeron::connect, Publication, Subscription handles over CnC | Not started |
+| Client library | (none) - Aeron::connect, Publication, Subscription handles over CnC | Done (pub data path; sub data path stubbed) |
 
 ## Decisions Made
 
@@ -104,7 +104,7 @@ Originally 7 `#[allow(dead_code)]` annotations. 2 resolved, 5 remaining:
 4. ~~**Medium:** RTTM processing - echo in receiver, RTT tracking in sender.~~ - **DONE**
 5. ~~**Medium:** Agent runner with idle strategy (spin/yield/park) to avoid 100% CPU.~~ - **DONE**
 6. ~~**Low:** Client conductor / shared memory IPC (CnC file, ring buffer commands).~~ - **DONE**
-7. **Low:** Client library - Aeron::connect(), Publication, Subscription handles over CnC.
+7. ~~**Low:** Client library - Aeron::connect(), Publication, Subscription handles over CnC.~~ - **DONE**
 
 ## Files Changed
 
@@ -131,3 +131,10 @@ Originally 7 `#[allow(dead_code)]` annotations. 2 resolved, 5 remaining:
 | A | `src/cnc/cnc_file.rs` |
 | A | `src/agent/conductor.rs` |
 | M | `src/lib.rs` |
+| A | `src/client/mod.rs` |
+| A | `src/client/aeron.rs` |
+| A | `src/client/bridge.rs` |
+| A | `src/client/publication.rs` |
+| A | `src/client/subscription.rs` |
+| A | `src/client/media_driver.rs` |
+| A | `tests/client_library.rs` |
