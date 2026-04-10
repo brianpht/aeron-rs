@@ -11,6 +11,7 @@ pub mod aeron;
 pub mod bridge;
 pub mod media_driver;
 pub mod publication;
+pub mod sub_bridge;
 pub mod subscription;
 
 pub use aeron::Aeron;

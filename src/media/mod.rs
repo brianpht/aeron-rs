@@ -3,6 +3,7 @@ pub mod channel;
 pub mod concurrent_publication;
 pub mod network_publication;
 pub mod poller;
+pub mod shared_image;
 pub mod term_buffer;
 pub mod transport;
 pub mod uring_poller;

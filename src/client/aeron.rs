@@ -4,7 +4,8 @@
 // For v1, works in-process only (same process as the driver).
 // Publications use ConcurrentPublication (Arc-shared log buffer) with
 // a lock-free bridge to deliver SenderPublication to the sender agent.
-// Subscriptions register via CnC but the data path is stubbed.
+// Subscriptions use SharedLogBuffer images (receiver writes, client reads
+// via Acquire/Release) with a SubscriptionBridge for image handle transfer.
 //
 // Not Sync (single-threaded client). Send (movable to a client thread).
 // No allocation in steady state (keepalive is pre-encoded).
@@ -20,6 +21,7 @@ use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::transport::UdpChannelTransport;
 
 use super::bridge::{PendingPublication, PublicationBridge};
+use super::sub_bridge::SubscriptionBridge;
 use super::publication::Publication;
 use super::subscription::Subscription;
 use super::ClientError;
@@ -37,6 +39,7 @@ pub struct Aeron {
     next_correlation_id: i64,
     next_session_id: i32,
     pub_bridge: Arc<PublicationBridge>,
+    sub_bridge: Arc<SubscriptionBridge>,
     /// Socket config for transport creation (cold path).
     socket_rcvbuf: usize,
     socket_sndbuf: usize,
@@ -59,6 +62,7 @@ impl Aeron {
         cnc_base: *mut u8,
         cnc_length: usize,
         pub_bridge: Arc<PublicationBridge>,
+        sub_bridge: Arc<SubscriptionBridge>,
         socket_rcvbuf: usize,
         socket_sndbuf: usize,
         multicast_ttl: u8,
@@ -81,6 +85,7 @@ impl Aeron {
             next_correlation_id: 1,
             next_session_id: 1,
             pub_bridge,
+            sub_bridge,
             socket_rcvbuf,
             socket_sndbuf,
             multicast_ttl,
@@ -184,10 +189,9 @@ impl Aeron {
     /// Add a subscription on the given channel and stream.
     ///
     /// Sends an AddSubscription command via CnC. The receiver agent
-    /// sets up the receive endpoint. Returns a `Subscription` handle.
-    ///
-    /// NOTE: Data path (`Subscription::poll`) is not yet implemented.
-    /// Requires shared-memory image buffers (future work).
+    /// sets up the receive endpoint and deposits image handles into the
+    /// subscription bridge. `Subscription::poll()` drains the bridge and
+    /// reads committed fragments from shared image buffers.
     pub fn add_subscription(
         &mut self,
         channel: &str,
@@ -209,7 +213,12 @@ impl Aeron {
             .write(CMD_ADD_SUBSCRIPTION, &buf)
             .map_err(|_| ClientError::RegistrationFailed)?;
 
-        Ok(Subscription::new(correlation_id, stream_id, channel))
+        Ok(Subscription::new(
+            correlation_id,
+            stream_id,
+            channel,
+            Arc::clone(&self.sub_bridge),
+        ))
     }
 
     /// Send a keepalive heartbeat to the driver.

@@ -24,6 +24,7 @@ use crate::context::DriverContext;
 
 use super::aeron::Aeron;
 use super::bridge::PublicationBridge;
+use super::sub_bridge::SubscriptionBridge;
 use super::ClientError;
 
 /// Default CnC ring buffer capacities.
@@ -42,6 +43,8 @@ pub struct MediaDriver {
     cnc_length: usize,
     /// Publication bridge shared with Aeron clients.
     pub_bridge: Arc<PublicationBridge>,
+    /// Subscription bridge shared with Aeron clients.
+    sub_bridge: Arc<SubscriptionBridge>,
     /// Config values passed to clients for transport creation.
     socket_rcvbuf: usize,
     socket_sndbuf: usize,
@@ -86,6 +89,9 @@ impl MediaDriver {
         // Create publication bridge.
         let pub_bridge = PublicationBridge::new();
 
+        // Create subscription bridge.
+        let sub_bridge = SubscriptionBridge::new();
+
         // Create conductor agent.
         let (conductor, _sender_queue, _receiver_queue) =
             ConductorAgent::new(cnc, ctx.driver_timeout_ns)?;
@@ -94,8 +100,9 @@ impl MediaDriver {
         let mut sender = SenderAgent::new(&ctx)?;
         sender.set_publication_bridge(Arc::clone(&pub_bridge));
 
-        // Create receiver agent.
-        let receiver = ReceiverAgent::new(&ctx)?;
+        // Create receiver agent with subscription bridge.
+        let mut receiver = ReceiverAgent::new(&ctx)?;
+        receiver.set_subscription_bridge(Arc::clone(&sub_bridge));
 
         // Build idle strategies.
         let idle = ctx.idle_strategy();
@@ -119,6 +126,7 @@ impl MediaDriver {
             cnc_base,
             cnc_length,
             pub_bridge,
+            sub_bridge,
             socket_rcvbuf,
             socket_sndbuf,
             multicast_ttl,
@@ -137,6 +145,7 @@ impl MediaDriver {
                 self.cnc_base,
                 self.cnc_length,
                 Arc::clone(&self.pub_bridge),
+                Arc::clone(&self.sub_bridge),
                 self.socket_rcvbuf,
                 self.socket_sndbuf,
                 self.multicast_ttl,

@@ -1,0 +1,637 @@
+// Shared image buffer - cross-thread data delivery from receiver to subscriber.
+//
+// Splits the image into two handles:
+//   - ReceiverImage (receiver agent thread, writer)
+//   - SubscriberImage (client application thread, reader)
+//
+// Both share an Arc<ImageInner> containing:
+//   - SharedLogBuffer (UnsafeCell<Vec<u8>>, allocated once)
+//   - receiver_position: AtomicI64 (written by receiver, read by subscriber)
+//   - subscriber_position: AtomicI64 (written by subscriber, read by receiver)
+//   - Immutable config (session_id, stream_id, term_length, etc.)
+//
+// Commit protocol (mirrors ConcurrentPublication but reversed):
+//   Receiver writes header+payload, then stores frame_length with Release.
+//   Subscriber loads frame_length with Acquire - if > 0, the frame is visible.
+//
+// No Mutex. No SeqCst. Zero allocation in steady state.
+
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::Arc;
+
+use crate::frame::DATA_HEADER_LENGTH;
+use crate::media::term_buffer::{
+    AppendError, SharedLogBuffer, PARTITION_COUNT,
+    align_frame_length, atomic_frame_length_load, atomic_frame_length_store,
+    partition_index,
+};
+
+// ---- Shared inner state ----
+
+/// Shared state between receiver and subscriber, wrapped in Arc.
+/// Allocated once at construction (cold path). Never resized.
+struct ImageInner {
+    log: SharedLogBuffer,
+    /// Highest written byte position. Written by receiver (Release),
+    /// read by subscriber (Acquire) to know how far data extends.
+    receiver_position: AtomicI64,
+    /// Highest read byte position. Written by subscriber (Release),
+    /// read by receiver (Acquire) for back-pressure.
+    subscriber_position: AtomicI64,
+    /// Set by receiver when this image is closed/removed.
+    /// Subscriber checks during poll and removes the image locally.
+    closed: AtomicBool,
+
+    // Immutable after construction - no atomics needed.
+    session_id: i32,
+    stream_id: i32,
+    initial_term_id: i32,
+    term_length: u32,
+    term_length_mask: u32,
+    position_bits_to_shift: u32,
+}
+
+// ---- ReceiverImage (writer handle) ----
+
+/// Writer handle owned by the ReceiverAgent.
+///
+/// Takes `&mut self` for all write operations - single writer enforced
+/// at compile time. Not Clone. Send.
+pub struct ReceiverImage {
+    inner: Arc<ImageInner>,
+    /// Local cached position. Single writer - avoids atomic load per write.
+    receiver_position_local: i64,
+}
+
+// ReceiverImage is Send (moved to receiver thread) but not Sync.
+// SAFETY: single writer, no concurrent access to mutable state.
+unsafe impl Send for ReceiverImage {}
+
+// ---- SubscriberImage (reader handle) ----
+
+/// Reader handle owned by the Subscription on the client thread.
+///
+/// Takes `&mut self` for `poll_fragments` - single reader per image.
+/// Not Clone. Send.
+pub struct SubscriberImage {
+    inner: Arc<ImageInner>,
+    /// Local cached position. Single reader - avoids atomic load per poll.
+    subscriber_position_local: i64,
+}
+
+// SubscriberImage is Send (moved to client thread) but not Sync.
+unsafe impl Send for SubscriberImage {}
+
+// ---- Construction ----
+
+/// Create a shared image pair (receiver writer + subscriber reader).
+///
+/// Cold path - allocation happens here, once (SharedLogBuffer + Arc).
+///
+/// Returns `None` if:
+/// - `term_length` is not a power-of-two or < 32 (FRAME_ALIGNMENT)
+pub fn new_shared_image(
+    session_id: i32,
+    stream_id: i32,
+    initial_term_id: i32,
+    active_term_id: i32,
+    term_length: u32,
+    initial_term_offset: i32,
+) -> Option<(ReceiverImage, SubscriberImage)> {
+    let log = SharedLogBuffer::new(term_length)?;
+
+    let term_length_mask = term_length - 1;
+    let position_bits_to_shift = term_length.trailing_zeros();
+
+    // Compute initial position from active_term_id + initial_term_offset.
+    let term_count = active_term_id.wrapping_sub(initial_term_id) as i64;
+    let initial_position = term_count * term_length as i64 + initial_term_offset as i64;
+
+    let inner = Arc::new(ImageInner {
+        log,
+        receiver_position: AtomicI64::new(initial_position),
+        subscriber_position: AtomicI64::new(initial_position),
+        closed: AtomicBool::new(false),
+        session_id,
+        stream_id,
+        initial_term_id,
+        term_length,
+        term_length_mask,
+        position_bits_to_shift,
+    });
+
+    let receiver = ReceiverImage {
+        inner: Arc::clone(&inner),
+        receiver_position_local: initial_position,
+    };
+
+    let subscriber = SubscriberImage {
+        inner,
+        subscriber_position_local: initial_position,
+    };
+
+    Some((receiver, subscriber))
+}
+
+// ---- ReceiverImage impl ----
+
+impl ReceiverImage {
+    /// Append a data frame (header + payload) into the image's shared log buffer.
+    ///
+    /// Writes the DataHeader and payload, then commits with an atomic Release
+    /// store of frame_length so the subscriber can see it.
+    ///
+    /// Returns the new term_offset on success.
+    ///
+    /// Zero-allocation, O(1). Hot path.
+    pub fn append_frame(
+        &mut self,
+        partition_idx: usize,
+        term_offset: u32,
+        header: &crate::frame::DataHeader,
+        payload: &[u8],
+    ) -> Result<u32, AppendError> {
+        if partition_idx >= PARTITION_COUNT {
+            return Err(AppendError::InvalidPartition);
+        }
+
+        let inner = &*self.inner;
+        let raw_len = DATA_HEADER_LENGTH + payload.len();
+        let aligned_len = align_frame_length(raw_len) as u32;
+        let new_offset = term_offset + aligned_len;
+
+        if new_offset > inner.term_length {
+            return Err(AppendError::TermFull);
+        }
+
+        let tl = inner.term_length as usize;
+        let base = partition_idx * tl + term_offset as usize;
+        let frame_length = raw_len as i32;
+
+        // SAFETY: Single writer (ReceiverImage takes &mut self).
+        // Back-pressure ensures subscriber finished reading this region.
+        // The buffer is allocated once and never resized.
+        unsafe {
+            let buf_ptr = inner.log.as_mut_ptr();
+
+            // Step 1: Write header bytes [0..32] with frame_length = 0.
+            // Zero frame_length means "not yet committed" to the subscriber.
+            let mut hdr_copy = std::ptr::read(header);
+            hdr_copy.frame_header.frame_length = 0;
+            std::ptr::copy_nonoverlapping(
+                &hdr_copy as *const crate::frame::DataHeader as *const u8,
+                buf_ptr.add(base),
+                DATA_HEADER_LENGTH,
+            );
+
+            // Step 2: Write payload bytes [32..32+len].
+            if !payload.is_empty() {
+                std::ptr::copy_nonoverlapping(
+                    payload.as_ptr(),
+                    buf_ptr.add(base + DATA_HEADER_LENGTH),
+                    payload.len(),
+                );
+            }
+
+            // Step 3: COMMIT - atomic Release store of the real frame_length.
+            // All preceding writes become visible to any thread that reads
+            // this word with Acquire.
+            atomic_frame_length_store(buf_ptr, base, frame_length);
+        }
+
+        Ok(new_offset)
+    }
+
+    /// Update the receiver position (Release store).
+    ///
+    /// Called after writing frames so the subscriber knows data is available.
+    #[inline]
+    pub fn advance_receiver_position(&mut self, new_pos: i64) {
+        self.receiver_position_local = new_pos;
+        self.inner
+            .receiver_position
+            .store(new_pos, Ordering::Release);
+    }
+
+    /// Check if the subscriber is too far behind (back-pressure).
+    ///
+    /// Returns `true` if the gap between receiver and subscriber exceeds
+    /// (PARTITION_COUNT - 1) terms - same limit as ConcurrentPublication.
+    /// When true, the receiver should skip writing to this image to avoid
+    /// overwriting unread data.
+    #[inline]
+    pub fn check_back_pressure(&self) -> bool {
+        let max_ahead =
+            self.inner.term_length as i64 * (PARTITION_COUNT as i64 - 1);
+        let sub_pos = self.inner.subscriber_position.load(Ordering::Acquire);
+        self.receiver_position_local.wrapping_sub(sub_pos) >= max_ahead
+    }
+
+    /// Zero out a partition during term rotation.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the subscriber has finished reading this partition
+    /// (guaranteed by back-pressure: receiver is at most 3 terms ahead).
+    pub fn clean_partition(&self, partition_idx: usize) {
+        // SAFETY: Back-pressure guarantees subscriber finished reading.
+        unsafe {
+            self.inner.log.clean_partition(partition_idx);
+        }
+    }
+
+    /// Signal that this image is closed. The subscriber will detect this
+    /// on the next poll and remove the image.
+    pub fn close(&self) {
+        self.inner.closed.store(true, Ordering::Release);
+    }
+
+    /// Session ID for this image.
+    #[inline]
+    pub fn session_id(&self) -> i32 {
+        self.inner.session_id
+    }
+
+    /// Stream ID for this image.
+    #[inline]
+    pub fn stream_id(&self) -> i32 {
+        self.inner.stream_id
+    }
+
+    /// Term length in bytes.
+    #[inline]
+    pub fn term_length(&self) -> u32 {
+        self.inner.term_length
+    }
+
+    /// Current receiver position (local cached copy).
+    #[inline]
+    pub fn receiver_position(&self) -> i64 {
+        self.receiver_position_local
+    }
+}
+
+// ---- SubscriberImage impl ----
+
+impl SubscriberImage {
+    /// Poll for committed fragments in this image.
+    ///
+    /// Walks forward through committed frames using Acquire loads on
+    /// frame_length (same scan pattern as SenderPublication::sender_scan).
+    /// Calls `handler(payload, session_id, stream_id)` for each fragment.
+    ///
+    /// Returns the number of fragments delivered (not bytes).
+    ///
+    /// After polling, stores subscriber_position with Release so the
+    /// receiver can see freed space for back-pressure.
+    ///
+    /// Zero-allocation, O(n) in fragments polled. Hot path.
+    pub fn poll_fragments<F>(&mut self, mut handler: F, limit: i32) -> i32
+    where
+        F: FnMut(&[u8], i32, i32),
+    {
+        if limit <= 0 {
+            return 0;
+        }
+
+        let inner = &*self.inner;
+
+        let term_id = inner.initial_term_id.wrapping_add(
+            (self.subscriber_position_local >> inner.position_bits_to_shift) as i32,
+        );
+        let term_offset =
+            (self.subscriber_position_local & inner.term_length_mask as i64) as u32;
+
+        let part_idx = partition_index(term_id, inner.initial_term_id);
+
+        let tl = inner.term_length as usize;
+        let part_base = part_idx * tl;
+        let buf_ptr = inner.log.as_ptr();
+
+        let mut pos = term_offset;
+        let mut fragments = 0i32;
+        let mut bytes_scanned: u32 = 0;
+
+        while pos < inner.term_length && fragments < limit {
+            let remaining = (inner.term_length - pos) as usize;
+            if remaining < 4 {
+                break;
+            }
+
+            let byte_offset = part_base + pos as usize;
+
+            // Acquire load of frame_length - pairs with receiver's Release store.
+            let frame_length = unsafe { atomic_frame_length_load(buf_ptr, byte_offset) };
+
+            // Zero or negative means uncommitted / not yet written.
+            if frame_length <= 0 {
+                break;
+            }
+
+            let frame_len_u = frame_length as u32;
+
+            // Frame too small to contain a DataHeader.
+            if frame_len_u < DATA_HEADER_LENGTH as u32 {
+                break;
+            }
+
+            let aligned_len = align_frame_length(frame_len_u as usize) as u32;
+
+            // Would exceed partition bounds.
+            if pos + aligned_len > inner.term_length {
+                break;
+            }
+
+            // Extract payload (everything after the 32-byte DataHeader).
+            let payload_start = byte_offset + DATA_HEADER_LENGTH;
+            let payload_len = frame_len_u as usize - DATA_HEADER_LENGTH;
+
+            // SAFETY: Acquire load of frame_length guarantees all header +
+            // payload bytes written by the receiver (before their Release
+            // store) are visible.
+            if payload_len > 0 {
+                let payload = unsafe {
+                    std::slice::from_raw_parts(
+                        buf_ptr.add(payload_start),
+                        payload_len,
+                    )
+                };
+                handler(payload, inner.session_id, inner.stream_id);
+            } else {
+                handler(&[], inner.session_id, inner.stream_id);
+            }
+
+            pos += aligned_len;
+            bytes_scanned += aligned_len;
+            fragments += 1;
+        }
+
+        // Release store of subscriber_position so receiver sees freed space.
+        if bytes_scanned > 0 {
+            self.subscriber_position_local += bytes_scanned as i64;
+            inner
+                .subscriber_position
+                .store(self.subscriber_position_local, Ordering::Release);
+        }
+
+        fragments
+    }
+
+    /// Check if the receiver has closed this image.
+    #[inline]
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire)
+    }
+
+    /// Session ID for this image.
+    #[inline]
+    pub fn session_id(&self) -> i32 {
+        self.inner.session_id
+    }
+
+    /// Stream ID for this image.
+    #[inline]
+    pub fn stream_id(&self) -> i32 {
+        self.inner.stream_id
+    }
+
+    /// Current subscriber position (local cached copy).
+    #[inline]
+    pub fn position(&self) -> i64 {
+        self.subscriber_position_local
+    }
+
+    /// Initial term ID.
+    #[inline]
+    pub fn initial_term_id(&self) -> i32 {
+        self.inner.initial_term_id
+    }
+
+    /// Term length in bytes.
+    #[inline]
+    pub fn term_length(&self) -> u32 {
+        self.inner.term_length
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::*;
+
+    const TEST_TERM_LENGTH: u32 = 1024;
+
+    fn make_data_header(
+        frame_length: i32,
+        term_offset: i32,
+        session_id: i32,
+        stream_id: i32,
+        term_id: i32,
+    ) -> DataHeader {
+        DataHeader {
+            frame_header: FrameHeader {
+                frame_length,
+                version: CURRENT_VERSION,
+                flags: DATA_FLAG_BEGIN | DATA_FLAG_END,
+                frame_type: FRAME_TYPE_DATA,
+            },
+            term_offset,
+            session_id,
+            stream_id,
+            term_id,
+            reserved_value: 0,
+        }
+    }
+
+    #[test]
+    fn new_shared_image_valid_params() {
+        let result = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0);
+        assert!(result.is_some());
+        let (recv, sub) = result.unwrap();
+        assert_eq!(recv.session_id(), 42);
+        assert_eq!(sub.session_id(), 42);
+        assert_eq!(recv.stream_id(), 7);
+        assert_eq!(sub.stream_id(), 7);
+        assert_eq!(recv.term_length(), TEST_TERM_LENGTH);
+        assert_eq!(sub.term_length(), TEST_TERM_LENGTH);
+    }
+
+    #[test]
+    fn new_shared_image_rejects_invalid() {
+        // Not power of two.
+        assert!(new_shared_image(1, 1, 0, 0, 100, 0).is_none());
+        // Too small.
+        assert!(new_shared_image(1, 1, 0, 0, 16, 0).is_none());
+        // Zero.
+        assert!(new_shared_image(1, 1, 0, 0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn poll_returns_zero_when_empty() {
+        let (_, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
+            .unwrap();
+        let count = sub.poll_fragments(|_, _, _| panic!("should not be called"), 10);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn append_and_poll_single_frame() {
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
+            .unwrap();
+
+        let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+        let frame_len = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
+        let hdr = make_data_header(frame_len, 0, 42, 7, 0);
+
+        let new_offset = recv.append_frame(0, 0, &hdr, &payload).unwrap();
+        assert!(new_offset > 0);
+
+        // Advance receiver position so subscriber can see it.
+        recv.advance_receiver_position(new_offset as i64);
+
+        // Poll should find the frame.
+        let mut found_payload = Vec::new();
+        let count = sub.poll_fragments(|data, sid, stid| {
+            assert_eq!(sid, 42);
+            assert_eq!(stid, 7);
+            found_payload.extend_from_slice(data);
+        }, 10);
+
+        assert_eq!(count, 1);
+        assert_eq!(&found_payload, &payload);
+    }
+
+    #[test]
+    fn poll_advances_subscriber_position() {
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
+            .unwrap();
+
+        let payload = [0xAB; 8];
+        let frame_len = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
+        let hdr = make_data_header(frame_len, 0, 42, 7, 0);
+
+        recv.append_frame(0, 0, &hdr, &payload).unwrap();
+        recv.advance_receiver_position(align_frame_length(frame_len as usize) as i64);
+
+        assert_eq!(sub.position(), 0);
+        sub.poll_fragments(|_, _, _| {}, 10);
+        assert!(sub.position() > 0, "position should advance after poll");
+
+        // Second poll should find nothing.
+        let count = sub.poll_fragments(|_, _, _| panic!("no more"), 10);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn multiple_frames_polled_in_order() {
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
+            .unwrap();
+
+        let mut offset: u32 = 0;
+        for i in 0..5u8 {
+            let payload = [i; 4];
+            let frame_len = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
+            let hdr = make_data_header(frame_len, offset as i32, 42, 7, 0);
+            let new_off = recv.append_frame(0, offset, &hdr, &payload).unwrap();
+            offset = new_off;
+        }
+        recv.advance_receiver_position(offset as i64);
+
+        let mut seen = Vec::new();
+        let count = sub.poll_fragments(|data, _, _| {
+            seen.push(data[0]);
+        }, 10);
+
+        assert_eq!(count, 5);
+        assert_eq!(seen, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn poll_respects_limit() {
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
+            .unwrap();
+
+        let mut offset: u32 = 0;
+        for i in 0..5u8 {
+            let payload = [i; 4];
+            let frame_len = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
+            let hdr = make_data_header(frame_len, offset as i32, 42, 7, 0);
+            offset = recv.append_frame(0, offset, &hdr, &payload).unwrap();
+        }
+        recv.advance_receiver_position(offset as i64);
+
+        // Poll only 2.
+        let count = sub.poll_fragments(|_, _, _| {}, 2);
+        assert_eq!(count, 2);
+
+        // Poll remaining 3.
+        let count = sub.poll_fragments(|_, _, _| {}, 10);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn back_pressure_detected() {
+        // Use smallest valid term so back-pressure triggers quickly.
+        let tl: u32 = 64;
+        let (mut recv, _sub) = new_shared_image(1, 1, 0, 0, tl, 0).unwrap();
+
+        // Advance receiver position far ahead without subscriber advancing.
+        let max_ahead = tl as i64 * (PARTITION_COUNT as i64 - 1);
+        recv.advance_receiver_position(max_ahead);
+
+        assert!(recv.check_back_pressure(), "should detect back-pressure");
+    }
+
+    #[test]
+    fn close_signal_visible() {
+        let (recv, sub) = new_shared_image(1, 1, 0, 0, TEST_TERM_LENGTH, 0)
+            .unwrap();
+        assert!(!sub.is_closed());
+        recv.close();
+        assert!(sub.is_closed());
+    }
+
+    #[test]
+    fn cross_thread_write_poll() {
+        // 20 frames * 64 bytes each = 1280 bytes; need term_length >= 1280.
+        // Use 2048 (next power-of-two) so all frames fit in one partition.
+        let cross_term_length: u32 = 2048;
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, cross_term_length, 0)
+            .unwrap();
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done_clone = done.clone();
+
+        let writer = std::thread::spawn(move || {
+            let mut offset: u32 = 0;
+            for i in 0..20u8 {
+                let payload = [i; 4];
+                let frame_len = DATA_HEADER_LENGTH as i32 + 4;
+                let hdr = make_data_header(frame_len, offset as i32, 42, 7, 0);
+                let new_off = recv.append_frame(0, offset, &hdr, &payload).unwrap();
+                offset = new_off;
+                recv.advance_receiver_position(offset as i64);
+            }
+            done_clone.store(true, std::sync::atomic::Ordering::Release);
+        });
+
+        let mut total = 0i32;
+        loop {
+            let n = sub.poll_fragments(|_, _, _| {}, 10);
+            total += n;
+            if total >= 20 {
+                break;
+            }
+            if n == 0 && done.load(std::sync::atomic::Ordering::Acquire) {
+                // Final drain.
+                total += sub.poll_fragments(|_, _, _| {}, 100);
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        writer.join().unwrap();
+        assert_eq!(total, 20);
+    }
+}
+
