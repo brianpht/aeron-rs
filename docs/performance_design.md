@@ -29,6 +29,7 @@
     - [13. Unsafe Policy](#13-unsafe-policy)
     - [14. Performance Budget](#14-performance-budget)
     - [15. Term Buffer & Publication Layer](#15-term-buffer--publication-layer)
+    - [16. CnC, Conductor, and Client Library](#16-cnc-conductor-and-client-library)
 - [Architecture Overview](#architecture-overview)
 - [Final Principle](#final-principle)
 
@@ -234,19 +235,20 @@ The entire I/O path uses io_uring - no `epoll`, no `select`, no `recvmsg` syscal
 
 ### 4. Single-Threaded Agent Model
 
-```
-┌─────────────────┐         ┌──────────────────┐
-│  SenderAgent    │         │  ReceiverAgent   │
-│  ┌────────────┐ │         │  ┌─────────────┐ │
-│  │ io_uring   │ │         │  │ io_uring    │ │
-│  │ ring       │ │         │  │ ring        │ │
-│  ├────────────┤ │         │  ├─────────────┤ │
-│  │ SlotPool   │ │         │  │ BufRingPool │ │
-│  │ Endpoints[]│ │         │  │ Endpoints[] │ │
-│  │ Pubs[]     │ │         │  │ Images[]    │ │
-│  └────────────┘ │         │  └─────────────┘ │
-└─────────────────┘         └──────────────────┘
-    Thread A                     Thread B
+```mermaid
+flowchart LR
+    subgraph T1["Thread 1: Conductor"]
+        C["ConductorAgent\n(no io_uring)"]
+    end
+    subgraph T2["Thread 2: Sender"]
+        S["SenderAgent\nio_uring ring\nSlotPool\nEndpoints[]\nPubs[]\nRetransmit"]
+    end
+    subgraph T3["Thread 3: Receiver"]
+        R["ReceiverAgent\nio_uring ring\nBufRingPool\nEndpoints[]\nImages[256]"]
+    end
+
+    C -->|"SPSC queue"| S
+    C -->|"SPSC queue"| R
 ```
 
 | Rule                                         | Rationale                                 |
@@ -261,13 +263,17 @@ The entire I/O path uses io_uring - no `epoll`, no `select`, no `recvmsg` syscal
 
 ```
 SenderAgent::do_work(now_ns):
-    1. do_send()        → scan publications, send heartbeat / setup / data
-    2. poll_control()   → reap CQEs for incoming SM / NAK (ratio-gated)
-    3. process_sm_nak() → update publication state from received control
+    1. clock.update()
+    2. do_send()           -> scan publications, send heartbeat / setup / RTTM / data
+    3. poll_control()      -> reap CQEs for incoming SM / NAK (ratio-gated)
+    4. poll_publication_bridge() -> take pending publications from client (cold path)
+    5. process_sm_and_nak() -> update sender_limit, queue retransmit actions
+    6. do_retransmit()      -> fire delayed retransmits, scan term buffer, re-send
 
 ReceiverAgent::do_work(now_ns):
-    1. poll_data()             → reap CQEs, dispatch data frames to images
-    2. send_control_messages() → generate SM / NAK, submit via io_uring
+    1. clock.update()
+    2. poll_data()             -> reap CQEs, dispatch data/setup frames to images
+    3. send_control_messages() -> generate SM / NAK / RTTM replies, submit via io_uring
 ```
 
 ---
@@ -719,46 +725,181 @@ Positions outside the buffer window are rejected.
 
 ---
 
-## Architecture Overview
+### 16. CnC, Conductor, and Client Library
+
+The CnC (Command and Control) subsystem, conductor agent, and client library handle all
+non-hot-path operations: publication/subscription management, client liveness, and driver lifecycle.
+
+#### ConductorAgent Duty Cycle
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        aeron-rs Media Driver                        │
-├───────────────────────────┬─────────────────────────────────────────┤
-│       SenderAgent         │          ReceiverAgent                  │
-│  ┌─────────────────────┐  │  ┌───────────────────────────────────┐  │
-│  │ UringTransportPoller│  │  │ UringTransportPoller              │  │
-│  │  ├─ IoUring ring    │  │  │  ├─ IoUring ring                  │  │
-│  │  ├─ SlotPool        │  │  │  ├─ BufRingPool (provided bufs)   │  │
-│  │  │   └─ SendSlot[]  │  │  │  ├─ SlotPool                      │  │
-│  │  └─ TransportEntry[]│  │  │  │   └─ SendSlot[] (for SM/NAK)   │  │
-│  ├─────────────────────┤  │  │  └─ TransportEntry[]              │  │
-│  │ SendChannelEndpoint │  │  ├───────────────────────────────────┤  │
-│  │  ├─ UdpTransport    │  │  │ ReceiveChannelEndpoint            │  │
-│  │  ├─ heartbeat_buf   │  │  │  ├─ UdpTransport                  │  │
-│  │  ├─ setup_buf       │  │  │  ├─ sm_buf / nak_buf              │  │
-│  │  ├─ recent_sm[]     │  │  │  ├─ pending_sms[]                 │  │
-│  │  └─ recent_naks[]   │  │  │  └─ pending_naks[]                │  │
-│  ├─────────────────────┤  │  ├───────────────────────────────────┤  │
-│  │ PublicationEntry[]  │  │  │ ImageEntry[256] + hash index      │  │
-│  └─────────────────────┘  │  └───────────────────────────────────┘  │
-│       Thread A            │           Thread B                      │
-└───────────────────────────┴─────────────────────────────────────────┘
+ConductorAgent::do_work(now_ns):
+    1. Read to-driver ring buffer (CnC MPSC)
+    2. Dispatch commands to sender/receiver via internal SPSC queues
+    3. Write responses to to-clients broadcast buffer
+    4. Check client liveness (flat scan of [ClientEntry; 64])
+    5. Update driver heartbeat timestamp
 ```
+
+The conductor has **no io_uring ring** and performs no I/O. All operations are bounded
+and zero-allocation in steady state.
+
+#### CnC Ring Buffer Performance
+
+| Component            | Type                          | Ordering           |
+|----------------------|-------------------------------|--------------------|
+| to-driver            | MpscRingBuffer (CAS on tail) | Acquire/Release    |
+| to-clients           | BroadcastTransmitter (SPSC)  | Acquire/Release    |
+| Internal cmd queues  | MpscRingBuffer (SPSC usage)  | Acquire/Release    |
+
+- Record alignment: 32 bytes (bitmask, no modulo)
+- Trailer: head + tail on separate cache lines (128-byte trailer, no false sharing)
+- Error types: `RingBufferError`, `BroadcastError` - stack-only, Copy, no heap
+- CnC region: anonymous mmap (in-process) or file-backed mmap (cross-process)
+
+#### PublicationBridge (Lock-Free SPSC Transfer)
+
+32 pre-allocated slots. Each slot uses `AtomicU8` state machine: `EMPTY -> FILLED -> EMPTY`.
+
+| Operation     | Thread   | Ordering | Cost per duty cycle       |
+|---------------|----------|----------|---------------------------|
+| deposit()     | Client   | Release  | Cold path, not measured   |
+| try_take()    | Sender   | Acquire  | 32 Acquire loads (all miss) |
+
+#### Cross-Thread Publication Commit Protocol
+
+The `frame_length` word at the start of each frame in `SharedLogBuffer` serves as
+the publish barrier - matching Aeron Java's `putOrdered` / `getVolatile` pattern:
+
+1. Publisher writes header + payload bytes (non-atomic)
+2. Publisher stores `frame_length` with **Release** ordering (commit)
+3. Scanner loads `frame_length` with **Acquire** ordering
+4. If `frame_length > 0`: all preceding writes are visible
+
+| Atomic             | Writer    | Reader    | Ordering          |
+|--------------------|-----------|-----------|-------------------|
+| frame_length (buf) | Publisher | Sender    | Release / Acquire |
+| pub_position       | Publisher | External  | Release / Acquire |
+| sender_position    | Sender    | Publisher | Release / Acquire |
+
+No Mutex. No SeqCst. No allocation.
+
+#### Command Types (Wire Format)
+
+All commands use `from_le_bytes` field-by-field encoding (per coding rules).
+Channel URIs stored inline in `[u8; 256]` - no String allocation.
+
+| Code | Name                | Direction        | Wire Size |
+|------|---------------------|------------------|-----------|
+| 1    | ADD_PUBLICATION     | Client -> Driver | 280 B     |
+| 2    | REMOVE_PUBLICATION  | Client -> Driver | 24 B      |
+| 3    | ADD_SUBSCRIPTION    | Client -> Driver | 280 B     |
+| 4    | REMOVE_SUBSCRIPTION | Client -> Driver | 24 B      |
+| 5    | CLIENT_KEEPALIVE    | Client -> Driver | 16 B      |
+| 6    | CLIENT_CLOSE        | Client -> Driver | 16 B      |
+
+| Code | Name                | Direction        | Wire Size |
+|------|---------------------|------------------|-----------|
+| 101  | PUBLICATION_READY   | Driver -> Client | 32 B      |
+| 102  | SUBSCRIPTION_READY  | Driver -> Client | 12 B      |
+| 103  | OPERATION_ERROR     | Driver -> Client | 272 B     |
+| 104  | DRIVER_HEARTBEAT    | Driver -> Client | (CnC hdr) |
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TB
+    subgraph UserApp["Application Thread"]
+        Aeron["Aeron Client"]
+        Pub["Publication (offer)"]
+    end
+
+    subgraph Driver["Media Driver"]
+        subgraph ConductorThread["Conductor Thread"]
+            Conductor["ConductorAgent"]
+            CnC["CnC (to-driver / to-clients)"]
+        end
+
+        subgraph SenderThread["Sender Thread"]
+            Sender["SenderAgent"]
+            SenderPoller["UringTransportPoller"]
+            SendEP["SendChannelEndpoint[]"]
+            PubEntry["PublicationEntry[]"]
+            Retransmit["RetransmitHandler"]
+        end
+
+        subgraph ReceiverThread["Receiver Thread"]
+            Receiver["ReceiverAgent"]
+            RecvPoller["UringTransportPoller"]
+            RecvEP["ReceiveChannelEndpoint[]"]
+            Images["ImageEntry[256] + hash index"]
+        end
+    end
+
+    subgraph Kernel["Linux Kernel"]
+        Ring1["io_uring (sender)"]
+        Ring2["io_uring (receiver)"]
+        UDP["UDP stack"]
+    end
+
+    Aeron -->|" CnC commands "| CnC
+    Aeron -->|" lock-free bridge "| Sender
+    Pub -->|" Arc shared log "| PubEntry
+    Conductor -->|" SPSC queue "| Sender
+    Conductor -->|" SPSC queue "| Receiver
+    Sender --> SenderPoller
+    SenderPoller -->|" SQE "| Ring1
+    Ring1 -->|" CQE "| SenderPoller
+    Ring1 --> UDP
+    Receiver --> RecvPoller
+    RecvPoller -->|" SQE "| Ring2
+    Ring2 -->|" CQE "| RecvPoller
+    UDP --> Ring2
+```
+
+### Cross-Thread Communication
+
+| From      | To        | Mechanism                                        | Hot path? |
+|-----------|-----------|--------------------------------------------------|-----------|
+| App       | Conductor | CnC to-driver MpscRingBuffer (CAS)              | No        |
+| Conductor | App       | CnC to-clients BroadcastBuffer                   | No        |
+| Conductor | Sender    | Internal MpscRingBuffer (SPSC)                   | No        |
+| Conductor | Receiver  | Internal MpscRingBuffer (SPSC)                   | No        |
+| App       | Sender    | PublicationBridge (32 slots, AtomicU8 state)     | Cold      |
+| App       | Sender    | SharedLogBuffer (Arc, atomic frame_length)       | **Yes**   |
 
 ### Data Flow
 
+```mermaid
+flowchart LR
+    subgraph SendPath["Send Path (hot)"]
+        O["Publication::offer()"] --> SLB["SharedLogBuffer write"]
+        SLB --> AFL["atomic frame_length Release"]
+        AFL --> SS["SenderAgent::sender_scan()"]
+        SS --> SD["SendChannelEndpoint::send_data()"]
+        SD --> AS["SlotPool::alloc_send()"]
+        AS --> SQE["SQE push"]
+        SQE --> FL["flush() - io_uring_enter"]
+        FL --> KS["Kernel sendmsg"]
+        KS --> CQE["CQE -> free_send()"]
+    end
 ```
-Sender:
-  Publication → DataHeader build → scratch buf → submit_send()
-    → SlotPool::alloc_send() → prepare_send() → SQE push
-    → flush() (io_uring_enter) → kernel sendmsg → CQE → free_send()
 
-Receiver:
-  Kernel recvmsg (multishot) → CQE with buf_ring buffer
-    → RecvMsgOut::parse → on_message() → DataFrameHandler::on_data()
-    → image update (wrapping arithmetic) → return_buf()
-    → SM/NAK generation → submit_send() → flush()
+```mermaid
+flowchart LR
+    subgraph RecvPath["Receive Path (hot)"]
+        KR["Kernel recvmsg (multishot)"] --> CQER["CQE with buf_ring buffer"]
+        CQER --> RP["RecvMsgOut::parse"]
+        RP --> OM["ReceiveChannelEndpoint::on_message()"]
+        OM --> FT{"frame_type?"}
+        FT -->|Data| OD["on_data() -> image lookup O(1)"]
+        FT -->|Setup| OS["on_setup() -> create image"]
+        OD --> AF["RawLog::append_frame()"]
+        AF --> RB["return_buf_local()"]
+        RB --> PT["publish_tail() - single Release"]
+    end
 ```
 
 ---

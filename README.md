@@ -18,8 +18,13 @@ The entire I/O path runs through `io_uring` with multishot receive and provided 
 - **Sub-Microsecond Offer Path**: ~8 ns from frame build to SQE push (userspace)
 - **High Throughput**: >= 3 M msg/s with 1408-byte frames on commodity hardware
 - **Cache-Oriented**: 64-byte aligned slots, stack-local CQE batching, flat-array dispatch
-- **CnC IPC**: mmap'd Command-and-Control file with MPSC ring buffer + broadcast for multi-process driver control
-- **3-Thread Conductor**: Conductor, Sender, Receiver agents on dedicated threads with lock-free SPSC command queues
+- **CnC IPC**: mmap'd Command-and-Control region (anonymous or file-backed) with MPSC ring buffer + broadcast
+- **3-Agent Thread Model**: Conductor, Sender, Receiver agents on dedicated threads with lock-free SPSC command queues
+- **Client Library**: `MediaDriver::launch` + `Aeron` client with `add_publication` / `add_subscription` API
+- **Cross-Thread Publication**: `ConcurrentPublication` via `Arc<SharedLogBuffer>` + Release/Acquire atomic frame-length commit
+- **Flow Control**: Sender-limit from Status Messages (consumption_position + receiver_window)
+- **Loss Recovery**: NAK-driven retransmit with delay/linger state machine (pre-sized flat array, zero-alloc)
+- **RTT Measurement**: RTTM echo with EWMA smoothed RTT (shift-based, no division)
 
 ## Requirements
 
@@ -38,7 +43,41 @@ aeron-rs = { path = "." }
 
 ## Quick Start
 
-### Sender Agent
+### In-Process Driver + Client (Recommended)
+
+```rust
+use aeron_rs::client::media_driver::MediaDriver;
+use aeron_rs::context::DriverContext;
+
+// Launch the media driver (conductor + sender + receiver threads).
+let driver = MediaDriver::launch(DriverContext::default())
+    .expect("driver launch");
+
+// Connect a client.
+let mut aeron = driver.connect().expect("connect");
+
+// Add a publication - creates transport, endpoint, and cross-thread publication.
+let mut pub_h = aeron
+    .add_publication("aeron:udp?endpoint=127.0.0.1:40123", 10)
+    .expect("add publication");
+
+// Offer data (zero-copy into shared log buffer, sender agent scans + sends).
+pub_h.offer(&[1, 2, 3, 4]).expect("offer");
+
+// Keep the driver alive with heartbeats.
+aeron.heartbeat().expect("heartbeat");
+
+// Shutdown.
+drop(aeron);
+driver.close().expect("close");
+```
+
+### Low-Level Agent API
+
+For fine-grained control, use the agents directly:
+
+<details>
+<summary>Sender Agent</summary>
 
 ```rust
 use std::net::SocketAddr;
@@ -79,7 +118,10 @@ loop {
 }
 ```
 
-### Receiver Agent
+</details>
+
+<details>
+<summary>Receiver Agent</summary>
 
 ```rust
 use std::net::SocketAddr;
@@ -108,6 +150,8 @@ loop {
     let _work = agent.do_work().expect("duty cycle");
 }
 ```
+
+</details>
 
 ### Direct Poller (Low-Level)
 
@@ -142,22 +186,37 @@ let result = poller.poll_recv(|msg: RecvMessage<'_>| {
 
 ## How It Works
 
-The driver implements the Aeron media layer with io_uring replacing all traditional socket syscalls:
+The driver implements the Aeron media layer with three dedicated agent threads and io_uring replacing all traditional socket syscalls:
 
-1. **Channel URIs**: Parsed from Aeron-style strings (`aeron:udp?endpoint=host:port`)
-2. **Transports**: UDP sockets managed via `socket2`, registered with the io_uring poller
-3. **Multishot Receive**: One `RecvMsgMulti` SQE stays armed across all completions - no re-arm per message
-4. **Provided Buffer Ring**: The kernel picks receive buffers from a pre-registered shared ring
-5. **Send Slots**: Pre-allocated `msghdr` + `iovec` structures; the kernel copies data into skb during SQE processing
-6. **CQE Dispatch**: Completions are batch-harvested to a stack buffer, then dispatched via packed `UserData` encoding
-7. **Agent Duty Cycle**: Single-threaded spin loop - poll CQEs, dispatch frames, generate control messages, flush SQEs
+1. **Conductor Agent**: Reads client commands from CnC (add/remove publication/subscription, keepalive), dispatches to sender/receiver via internal SPSC queues, writes responses via broadcast buffer
+2. **Sender Agent**: Scans publications for committed frames, sends data/heartbeat/setup/RTTM via io_uring, receives SM/NAK control messages, drives retransmit handler
+3. **Receiver Agent**: Receives data frames via multishot io_uring, dispatches to images (O(1) hash lookup), detects gaps and schedules NAKs, sends SM/NAK/RTTM replies
+4. **Client Library**: `Aeron` client uses CnC ring buffer for commands and `PublicationBridge` (lock-free SPSC) to transfer publications to the sender; cross-thread `offer()` via `Arc<SharedLogBuffer>` + atomic frame-length commit
 
-```
-┌─────────────┐  SQE   ┌──────────────────────┐  io_uring_enter  ┌────────┐
-│ Agent       │───────▶│ UringTransportPoller │─────────────────▶│ Kernel │
-│ (single-    │  CQE   │  SlotPool (pinned)   │◀─────────────────│        │
-│  threaded)  │◀───────│  BufRingPool (shared)│                  └────────┘
-└─────────────┘        └──────────────────────┘
+```mermaid
+flowchart LR
+    subgraph App["Application Thread"]
+        Aeron["Aeron Client"]
+        Pub["Publication::offer()"]
+    end
+    subgraph Driver["Media Driver"]
+        Conductor["ConductorAgent"]
+        Sender["SenderAgent"]
+        Receiver["ReceiverAgent"]
+    end
+    subgraph K["Linux Kernel"]
+        Ring1["io_uring (sender)"]
+        Ring2["io_uring (receiver)"]
+    end
+
+    Aeron -->|"CnC commands"| Conductor
+    Conductor -->|"SPSC queue"| Sender
+    Conductor -->|"SPSC queue"| Receiver
+    Pub -->|"Arc shared log"| Sender
+    Sender -->|"SQE"| Ring1
+    Ring1 -->|"CQE"| Sender
+    Receiver -->|"SQE"| Ring2
+    Ring2 -->|"CQE"| Receiver
 ```
 
 ## Configuration
@@ -167,27 +226,41 @@ use aeron_rs::context::DriverContext;
 
 let ctx = DriverContext {
     // Socket buffers
-    socket_rcvbuf: 2 * 1024 * 1024,        // SO_RCVBUF
-    socket_sndbuf: 2 * 1024 * 1024,        // SO_SNDBUF
+    socket_rcvbuf: 2 * 1024 * 1024,        // SO_RCVBUF (default 2 MiB)
+    socket_sndbuf: 2 * 1024 * 1024,        // SO_SNDBUF (default 2 MiB)
     mtu_length: 1408,                       // Max frame payload
+    multicast_ttl: 0,                       // Multicast TTL (0 = system default)
 
     // io_uring
-    uring_ring_size: 512,                   // SQ/CQ ring entries
+    uring_ring_size: 512,                   // SQ/CQ ring entries (power-of-two)
     uring_recv_slots_per_transport: 16,     // Recv slots per transport
     uring_send_slots: 128,                  // Total send slots
-    uring_buf_ring_entries: 256,            // Provided buffer ring (power-of-two)
+    uring_buf_ring_entries: 256,            // Provided buffer ring (power-of-two, max 32768)
     uring_sqpoll: false,                    // Kernel-side SQ polling
     uring_sqpoll_idle_ms: 1000,             // SQPOLL idle timeout
 
     // Sender timing
     heartbeat_interval_ns: 100_000_000,     // 100 ms
     send_duty_cycle_ratio: 4,               // Send:poll ratio
+    term_buffer_length: 64 * 1024,          // 64 KiB per partition (x4 = 256 KiB per pub)
+    retransmit_unicast_delay_ns: 0,         // Retransmit delay (0 = immediate)
+    retransmit_unicast_linger_ns: 60_000_000, // Retransmit linger (60 ms)
 
     // Receiver timing
     sm_interval_ns: 200_000_000,            // Status message interval (200 ms)
     nak_delay_ns: 60_000_000,               // NAK delay (60 ms)
+    rttm_interval_ns: 1_000_000_000,        // RTTM interval (1 s)
+    max_receiver_images: 256,               // Max concurrent images [1, 256]
 
-    ..DriverContext::default()
+    // General
+    driver_timeout_ns: 10_000_000_000,      // Client liveness timeout (10 s)
+    timer_interval_ns: 1_000_000,           // General timer tick (1 ms)
+
+    // Idle strategy (Backoff: spin -> yield -> park)
+    idle_strategy_max_spins: 10,            // Spin iterations before yield
+    idle_strategy_max_yields: 5,            // Yield iterations before park
+    idle_strategy_min_park_ns: 1_000,       // Min park duration (1 us)
+    idle_strategy_max_park_ns: 1_000_000,   // Max park duration (1 ms)
 };
 ```
 
@@ -279,7 +352,7 @@ This driver is built with deterministic, low-latency performance as a core desig
 - **Wrapping arithmetic**: All sequence/term comparisons use `wrapping_sub` + half-range check
 - **Little-endian wire format**: `repr(C, packed)` overlay parsing - zero byte-swap on x86_64
 
-For detailed performance design principles, architecture decisions, and optimization guidelines, see [docs/performance_design.md](docs/performance_design.md).
+For detailed performance design principles, architecture decisions, and optimization guidelines, see [docs/performance_design.md](docs/performance_design.md). For the full architecture overview, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Examples
 
@@ -295,6 +368,9 @@ cargo run --example recv_data
 
 # Ping-pong RTT measurement (io_uring -> std echo)
 cargo run --example ping_pong
+
+# Diagnostic ping (driver-level connectivity check)
+cargo run --example diag_ping
 
 # Throughput measurement (>= 3 M msg/s target)
 cargo run --release --example throughput
@@ -318,37 +394,46 @@ cargo bench
 
 ```
 src/
-├── lib.rs                          # Public module exports
-├── frame.rs                        # Wire protocol frames (parse + write)
-├── clock.rs                        # Monotonic nanosecond clock
-├── context.rs                      # DriverContext configuration
-├── agent/
-│   ├── mod.rs                      # Agent trait (do_work / on_start / on_close)
-│   ├── sender.rs                   # SenderAgent - heartbeat, setup, data send
-│   ├── receiver.rs                 # ReceiverAgent - data dispatch, SM/NAK generation
-│   ├── conductor.rs                # ConductorAgent - CnC command dispatch, 3-thread model
-│   ├── idle_strategy.rs            # BusySpin, Noop, Sleeping, Backoff strategies
-│   └── runner.rs                   # AgentRunner - threaded + sync agent lifecycle
-├── cnc/
-│   ├── mod.rs                      # CnC module exports
-│   ├── ring_buffer.rs              # MPSC ring buffer (client -> driver commands)
-│   ├── broadcast.rs                # Broadcast buffer (driver -> client responses)
-│   ├── command.rs                  # Command/response protocol (fixed-size, le-bytes)
-│   └── cnc_file.rs                 # CnC mmap file (DriverCnc + ClientCnc)
-└── media/
-    ├── mod.rs                      # Media layer module exports
-    ├── channel.rs                  # Aeron URI parsing (aeron:udp?endpoint=...)
-    ├── transport.rs                # UDP socket management (socket2)
-    ├── poller.rs                   # TransportPoller trait + PollError
-    ├── uring_poller.rs             # io_uring implementation (multishot + buf_ring)
-    ├── buffer_pool.rs              # SlotPool (pinned send/recv slots)
-    ├── term_buffer.rs              # RawLog + SharedLogBuffer (4 partitions, ADR-001)
-    ├── network_publication.rs      # NetworkPublication (offer, sender_scan, rotation)
-    ├── concurrent_publication.rs   # Cross-thread offer/scan (atomic frame-length commit)
-    ├── retransmit_handler.rs       # NAK-driven retransmit scheduler (flat array)
-    ├── send_channel_endpoint.rs    # Send endpoint (heartbeat, setup, SM/NAK ingest)
-    └── receive_channel_endpoint.rs # Recv endpoint (data dispatch, SM/NAK generation)
++-- lib.rs                          # Public module exports
++-- frame.rs                        # Wire protocol frames (parse + write)
++-- clock.rs                        # Monotonic nanosecond clock + cached variant
++-- context.rs                      # DriverContext configuration (18 constraint checks)
++-- agent/
+|   +-- mod.rs                      # Agent trait (do_work / on_start / on_close)
+|   +-- sender.rs                   # SenderAgent - send data, heartbeat, setup, RTTM, retransmit
+|   +-- receiver.rs                 # ReceiverAgent - data dispatch, SM/NAK generation, image mgmt
+|   +-- conductor.rs                # ConductorAgent - CnC command dispatch, client liveness
+|   +-- idle_strategy.rs            # BusySpin, Noop, Sleeping, Backoff strategies
+|   +-- runner.rs                   # AgentRunner - threaded + sync agent lifecycle
++-- cnc/
+|   +-- mod.rs                      # CnC module exports
+|   +-- ring_buffer.rs              # MPSC ring buffer (CAS-based, client -> driver commands)
+|   +-- broadcast.rs                # Broadcast buffer (driver -> client responses)
+|   +-- command.rs                  # Command/response protocol (fixed-size, le-bytes)
+|   +-- cnc_file.rs                 # CnC mmap region (DriverCnc + ClientCnc, anonymous or file-backed)
++-- client/
+|   +-- mod.rs                      # ClientError, re-exports
+|   +-- media_driver.rs             # MediaDriver (launches 3 agent threads, creates CnC + bridge)
+|   +-- aeron.rs                    # Aeron client (add_publication, add_subscription, heartbeat)
+|   +-- bridge.rs                   # PublicationBridge (lock-free SPSC, 32 slots, AtomicU8 state)
+|   +-- publication.rs              # Publication (user-facing offer handle, wraps ConcurrentPublication)
+|   +-- subscription.rs             # Subscription (registration tracking, data path stubbed)
++-- media/
+    +-- mod.rs                      # Media layer module exports
+    +-- channel.rs                  # Aeron URI parsing (aeron:udp?endpoint=...)
+    +-- transport.rs                # UDP socket management (socket2, unicast/multicast)
+    +-- poller.rs                   # TransportPoller trait + PollError (stack-only)
+    +-- uring_poller.rs             # io_uring implementation (multishot + buf_ring)
+    +-- buffer_pool.rs              # SlotPool (pinned send/recv slots, 64-byte aligned)
+    +-- term_buffer.rs              # RawLog + SharedLogBuffer (4 partitions, ADR-001)
+    +-- network_publication.rs      # NetworkPublication (single-thread offer/scan/rotation)
+    +-- concurrent_publication.rs   # Cross-thread offer/scan (atomic frame-length commit)
+    +-- retransmit_handler.rs       # NAK-driven retransmit scheduler (delay/linger, flat array)
+    +-- send_channel_endpoint.rs    # Send endpoint (heartbeat, setup, SM/NAK/RTTM queues)
+    +-- receive_channel_endpoint.rs # Recv endpoint (data dispatch, SM/NAK generation)
 ```
+
+For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## License
 
