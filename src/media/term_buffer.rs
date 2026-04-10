@@ -11,7 +11,9 @@ use std::cell::UnsafeCell;
 use std::fmt;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::frame::DATA_HEADER_LENGTH;
+use crate::frame::{
+    DATA_HEADER_LENGTH, FRAME_TYPE_PAD, CURRENT_VERSION,
+};
 
 // ---- Constants ----
 
@@ -270,6 +272,61 @@ impl RawLog {
     pub fn clean_partition(&mut self, partition_idx: usize) {
         if let Some(part) = self.partition_mut(partition_idx) {
             part.fill(0);
+        }
+    }
+
+    /// Write a padding frame covering the unused tail of a term partition.
+    ///
+    /// Called before `rotate_term()` when `append_frame` returns `TermFull`
+    /// and `term_offset < term_length`. The pad frame has `frame_type =
+    /// FRAME_TYPE_PAD` and `frame_length = term_length - term_offset`,
+    /// allowing `scan_frames` to advance `sender_position` past the term
+    /// boundary instead of getting stuck on zeros.
+    ///
+    /// Only the 32-byte DataHeader is written - the remaining bytes in the
+    /// pad region are already zeroed from construction or `clean_partition`.
+    ///
+    /// No-op if `term_offset >= term_length` or `remaining < DATA_HEADER_LENGTH`.
+    pub fn write_pad_frame(
+        &mut self,
+        partition_idx: usize,
+        term_offset: u32,
+    ) {
+        if partition_idx >= PARTITION_COUNT {
+            return;
+        }
+        if term_offset >= self.term_length {
+            return;
+        }
+        let remaining = self.term_length - term_offset;
+        if (remaining as usize) < DATA_HEADER_LENGTH {
+            return;
+        }
+        let tl = self.term_length as usize;
+        let base = partition_idx * tl + term_offset as usize;
+
+        // Build a minimal DataHeader on the stack with FRAME_TYPE_PAD.
+        let hdr = crate::frame::DataHeader {
+            frame_header: crate::frame::FrameHeader {
+                frame_length: remaining as i32,
+                version: CURRENT_VERSION,
+                flags: 0,
+                frame_type: FRAME_TYPE_PAD,
+            },
+            term_offset: term_offset as i32,
+            session_id: 0,
+            stream_id: 0,
+            term_id: 0,
+            reserved_value: 0,
+        };
+
+        // SAFETY: bounds verified above - base + DATA_HEADER_LENGTH <= total buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &hdr as *const crate::frame::DataHeader as *const u8,
+                self.buffer[base..].as_mut_ptr(),
+                DATA_HEADER_LENGTH,
+            );
         }
     }
 }

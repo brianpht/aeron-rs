@@ -177,6 +177,9 @@ impl NetworkPublication {
                 Ok(self.pub_position)
             }
             Err(AppendError::TermFull) => {
+                // Write a pad frame at the unused tail so sender_scan can
+                // advance past it instead of getting stuck on zeros.
+                self.raw_log.write_pad_frame(partition_idx, self.term_offset);
                 self.rotate_term();
                 Err(OfferError::AdminAction)
             }

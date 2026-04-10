@@ -263,8 +263,8 @@ offer() -> sender do_work -> UDP -> receiver do_work -> SM back -> sender do_wor
 
 ## Next Steps
 
-1. **High:** Implement `tests/e2e_send_recv.rs` - the most critical missing coverage (Step 4)
-2. **High:** Implement `benches/e2e_throughput.rs` - primary Aeron C comparison metric (Step 1)
+1. ~~**High:** Implement `tests/e2e_send_recv.rs` - the most critical missing coverage (Step 4)~~ **Done**
+2. ~~**High:** Implement `benches/e2e_throughput.rs` - primary Aeron C comparison metric (Step 1)~~ **Done** (hang under investigation - SM interval gating)
 3. **High:** Implement `tests/protocol_handshake.rs` - validates session lifecycle (Step 5)
 4. **Medium:** Implement `benches/e2e_latency.rs` - RTT comparison with Aeron C (Step 2)
 5. **Medium:** Implement `tests/loss_recovery_e2e.rs` - validates NAK/retransmit path (Step 6)

@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::frame::{
     DataHeader, FrameHeader, CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END,
-    DATA_HEADER_LENGTH, FRAME_TYPE_DATA,
+    DATA_HEADER_LENGTH, FRAME_TYPE_DATA, FRAME_TYPE_PAD,
 };
 use crate::media::network_publication::OfferError;
 use crate::media::term_buffer::{
@@ -183,6 +183,37 @@ impl ConcurrentPublication {
 
         // Check term capacity.
         if new_offset > inner.term_length {
+            // Write a pad frame at the unused tail so sender_scan can
+            // advance past it instead of getting stuck on zeros.
+            let remaining = inner.term_length - self.term_offset;
+            if remaining as usize >= DATA_HEADER_LENGTH {
+                let tl = inner.term_length as usize;
+                let pad_base = part_idx * tl + self.term_offset as usize;
+                let pad_hdr = DataHeader {
+                    frame_header: FrameHeader {
+                        frame_length: remaining as i32,
+                        version: CURRENT_VERSION,
+                        flags: 0,
+                        frame_type: FRAME_TYPE_PAD,
+                    },
+                    term_offset: self.term_offset as i32,
+                    session_id: 0,
+                    stream_id: 0,
+                    term_id: 0,
+                    reserved_value: 0,
+                };
+                unsafe {
+                    let buf_ptr = inner.log.as_mut_ptr();
+                    // Write pad header bytes [4..32] first.
+                    std::ptr::copy_nonoverlapping(
+                        (&pad_hdr as *const DataHeader as *const u8).add(4),
+                        buf_ptr.add(pad_base + 4),
+                        DATA_HEADER_LENGTH - 4,
+                    );
+                    // Commit: atomic Release store of frame_length at [0..4].
+                    atomic_frame_length_store(buf_ptr, pad_base, remaining as i32);
+                }
+            }
             self.rotate_term();
             return Err(OfferError::AdminAction);
         }

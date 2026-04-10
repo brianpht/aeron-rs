@@ -588,16 +588,27 @@ impl SenderAgent {
                 let sender_pos = pub_entry.sender_position();
                 let available = sender_lim.wrapping_sub(sender_pos);
 
+                // Use full available window (not capped at MTU) so the
+                // sender can scan multiple frames per do_work() cycle.
                 let limit = if available <= 0 {
                     0
-                } else if available >= pub_entry.mtu() as i64 {
-                    pub_entry.mtu()
+                } else if available > u32::MAX as i64 {
+                    u32::MAX
                 } else {
                     available as u32
                 };
 
                 if limit > 0 {
                     let scanned = pub_entry.sender_scan(limit, |_off, data| {
+                        // Skip pad frames - they are scan-advance markers
+                        // only, not transmitted over the wire. Check
+                        // frame_type at bytes [6..8] (little-endian u16).
+                        if data.len() >= 8 {
+                            let ft = u16::from_le_bytes([data[6], data[7]]);
+                            if ft == crate::frame::FRAME_TYPE_PAD {
+                                return;
+                            }
+                        }
                         let _ = ep.send_data(poller, data, dest);
                     });
 
