@@ -32,6 +32,8 @@ pub enum ClientError {
     ChannelInvalid,
     /// Maximum number of in-flight publication transfers reached.
     MaxPublicationsReached,
+    /// Maximum number of in-flight subscription endpoint transfers reached.
+    MaxSubscriptionsReached,
     /// Invalid parameters (term_length, mtu, etc).
     InvalidParams,
     /// CnC mapping or version error.
@@ -48,6 +50,7 @@ impl std::fmt::Display for ClientError {
             Self::RegistrationFailed => f.write_str("registration failed"),
             Self::ChannelInvalid => f.write_str("invalid channel URI"),
             Self::MaxPublicationsReached => f.write_str("max publications reached"),
+            Self::MaxSubscriptionsReached => f.write_str("max subscriptions reached"),
             Self::InvalidParams => f.write_str("invalid parameters"),
             Self::CncError => f.write_str("CnC mapping error"),
             Self::TransportError => f.write_str("transport open failed"),

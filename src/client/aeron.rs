@@ -17,11 +17,12 @@ use crate::cnc::cnc_file::ClientCnc;
 use crate::cnc::command::*;
 use crate::media::channel::UdpChannel;
 use crate::media::concurrent_publication::new_concurrent;
+use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::transport::UdpChannelTransport;
 
 use super::bridge::{PendingPublication, PublicationBridge};
-use super::sub_bridge::SubscriptionBridge;
+use super::sub_bridge::{PendingRecvEndpoint, RecvEndpointBridge, SubscriptionBridge};
 use super::publication::Publication;
 use super::subscription::Subscription;
 use super::ClientError;
@@ -40,6 +41,7 @@ pub struct Aeron {
     next_session_id: i32,
     pub_bridge: Arc<PublicationBridge>,
     sub_bridge: Arc<SubscriptionBridge>,
+    recv_endpoint_bridge: Arc<RecvEndpointBridge>,
     /// Socket config for transport creation (cold path).
     socket_rcvbuf: usize,
     socket_sndbuf: usize,
@@ -63,6 +65,7 @@ impl Aeron {
         cnc_length: usize,
         pub_bridge: Arc<PublicationBridge>,
         sub_bridge: Arc<SubscriptionBridge>,
+        recv_endpoint_bridge: Arc<RecvEndpointBridge>,
         socket_rcvbuf: usize,
         socket_sndbuf: usize,
         multicast_ttl: u8,
@@ -86,6 +89,7 @@ impl Aeron {
             next_session_id: 1,
             pub_bridge,
             sub_bridge,
+            recv_endpoint_bridge,
             socket_rcvbuf,
             socket_sndbuf,
             multicast_ttl,
@@ -188,10 +192,12 @@ impl Aeron {
 
     /// Add a subscription on the given channel and stream.
     ///
-    /// Sends an AddSubscription command via CnC. The receiver agent
-    /// sets up the receive endpoint and deposits image handles into the
-    /// subscription bridge. `Subscription::poll()` drains the bridge and
-    /// reads committed fragments from shared image buffers.
+    /// Parses the channel URI, opens a UDP transport bound to the endpoint
+    /// address, creates a ReceiveChannelEndpoint, and deposits it into the
+    /// recv endpoint bridge for the receiver agent to pick up. Also sends
+    /// an AddSubscription command via CnC for bookkeeping.
+    ///
+    /// Cold path - opens a socket and creates the endpoint.
     pub fn add_subscription(
         &mut self,
         channel: &str,
@@ -199,7 +205,44 @@ impl Aeron {
     ) -> Result<Subscription, ClientError> {
         let correlation_id = self.alloc_correlation_id();
 
-        // Send AddSubscription via CnC.
+        // Parse channel URI.
+        let udp_channel = UdpChannel::parse(channel)
+            .map_err(|_| ClientError::ChannelInvalid)?;
+
+        // Build a minimal DriverContext for transport creation.
+        let transport_ctx = crate::context::DriverContext {
+            socket_rcvbuf: self.socket_rcvbuf,
+            socket_sndbuf: self.socket_sndbuf,
+            multicast_ttl: self.multicast_ttl,
+            mtu_length: self.mtu as usize,
+            term_buffer_length: self.term_length,
+            ..crate::context::DriverContext::default()
+        };
+
+        // For subscriptions, bind to the endpoint address (we are the listener).
+        let local_addr = udp_channel.remote_data;
+        let remote_addr = udp_channel.remote_data; // domain detection only
+
+        let transport = UdpChannelTransport::open(
+            &udp_channel,
+            &local_addr,
+            &remote_addr,
+            &transport_ctx,
+        ).map_err(|_| ClientError::TransportError)?;
+
+        let endpoint = ReceiveChannelEndpoint::new(
+            udp_channel.clone(),
+            transport,
+            correlation_id, // use correlation_id as receiver_id
+        );
+
+        // Deposit endpoint in the bridge for the receiver agent.
+        let pending = PendingRecvEndpoint { endpoint };
+        if !self.recv_endpoint_bridge.deposit(pending) {
+            return Err(ClientError::MaxSubscriptionsReached);
+        }
+
+        // Send AddSubscription via CnC for bookkeeping.
         let cmd = AddSubscription::from_channel(
             correlation_id,
             self.client_id,

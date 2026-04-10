@@ -7,7 +7,7 @@ use super::{Agent, AgentError};
 use crate::clock::CachedNanoClock;
 use crate::frame::*;
 
-use crate::client::sub_bridge::{PendingImage, SubscriptionBridge};
+use crate::client::sub_bridge::{PendingImage, RecvEndpointBridge, SubscriptionBridge};
 use crate::context::DriverContext;
 use crate::media::poller::{RecvMessage, TransportPoller};
 use crate::media::receive_channel_endpoint::{
@@ -226,6 +226,9 @@ pub struct ReceiverAgent {
     /// Bridge to deliver SubscriberImage handles to client subscriptions.
     /// Set via `set_subscription_bridge()` before starting the agent.
     sub_bridge: Option<Arc<SubscriptionBridge>>,
+    /// Bridge to receive new ReceiveChannelEndpoints from the client.
+    /// Set via `set_recv_endpoint_bridge()` before starting the agent.
+    recv_endpoint_bridge: Option<Arc<RecvEndpointBridge>>,
 }
 
 // SAFETY: ReceiverAgent exclusively owns all its fields including the
@@ -469,6 +472,7 @@ impl ReceiverAgent {
             nak_queue: [unsafe { std::mem::zeroed() }; MAX_PENDING_NAKS_PER_CYCLE],
             nak_queue_len: 0,
             sub_bridge: None,
+            recv_endpoint_bridge: None,
         })
     }
 
@@ -487,6 +491,50 @@ impl ReceiverAgent {
     /// Must be called before `start()`. Cold path.
     pub(crate) fn set_subscription_bridge(&mut self, bridge: Arc<SubscriptionBridge>) {
         self.sub_bridge = Some(bridge);
+    }
+
+    /// Set the endpoint bridge for receiving ReceiveChannelEndpoints from the client.
+    ///
+    /// Must be called before `start()`. Cold path.
+    pub(crate) fn set_recv_endpoint_bridge(&mut self, bridge: Arc<RecvEndpointBridge>) {
+        self.recv_endpoint_bridge = Some(bridge);
+    }
+
+    /// Poll the endpoint bridge for new receive endpoints deposited by the
+    /// Aeron client (add_subscription).
+    ///
+    /// For each pending endpoint: register with the poller and add to the
+    /// endpoints array. Cold-path per item (socket registration, Vec push).
+    /// The scan itself is O(RECV_ENDPOINT_BRIDGE_CAPACITY) Acquire loads when empty.
+    fn poll_recv_endpoint_bridge(&mut self) -> i32 {
+        let Some(ref bridge) = self.recv_endpoint_bridge else {
+            return 0;
+        };
+
+        let cap = bridge.capacity();
+        let mut count = 0i32;
+
+        for i in 0..cap {
+            let item = {
+                let Some(ref bridge) = self.recv_endpoint_bridge else {
+                    break;
+                };
+                bridge.try_take(i)
+            };
+
+            if let Some(pending) = item {
+                let mut endpoint = pending.endpoint;
+                let register_result = endpoint.register(&mut self.poller);
+                if register_result.is_err() {
+                    tracing::warn!("failed to register recv endpoint from bridge");
+                    continue;
+                }
+                self.endpoints.push(endpoint);
+                count += 1;
+            }
+        }
+
+        count
     }
 
     /// Remove an image by (session_id, stream_id).
@@ -652,6 +700,9 @@ impl Agent for ReceiverAgent {
     fn do_work(&mut self) -> Result<i32, AgentError> {
         let now_ns = self.clock.update();
         let mut work_count = 0i32;
+
+        // Step 0: Drain endpoint bridge for new receive endpoints (cold path).
+        work_count += self.poll_recv_endpoint_bridge();
 
         // Step 1: Poll incoming data from io_uring.
         work_count += self.poll_data(now_ns);

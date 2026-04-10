@@ -418,6 +418,7 @@ impl SubscriberImage {
 mod tests {
     use super::*;
     use crate::frame::*;
+    use crate::media::term_buffer::FRAME_ALIGNMENT;
 
     const TEST_TERM_LENGTH: u32 = 1024;
 
@@ -589,6 +590,175 @@ mod tests {
         assert!(!sub.is_closed());
         recv.close();
         assert!(sub.is_closed());
+    }
+
+    #[test]
+    fn term_rotation_and_poll() {
+        // Use a small term (256 bytes) so we can fill partition 0 quickly.
+        // 256 / 32 = 8 header-only frames per partition.
+        let tl: u32 = 256;
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0)
+            .expect("valid params");
+
+        // Fill partition 0 (term 0) completely with 8 header-only frames.
+        let frames_per_term = (tl / FRAME_ALIGNMENT as u32) as usize;
+        let mut offset: u32 = 0;
+        for i in 0..frames_per_term {
+            let payload = [i as u8; 0]; // header-only
+            let frame_len = DATA_HEADER_LENGTH as i32;
+            let hdr = make_data_header(frame_len, offset as i32, 42, 7, 0);
+            offset = recv.append_frame(0, offset, &hdr, &payload)
+                .expect("append in term 0");
+        }
+        assert_eq!(offset, tl, "partition 0 should be exactly full");
+
+        // Clean partition 1 before writing (simulates receiver term rotation).
+        recv.clean_partition(1);
+
+        // Write 3 frames into partition 1 (term 1) at offset 0.
+        let term1_pidx = partition_index(1, 0);
+        assert_eq!(term1_pidx, 1);
+        let mut t1_offset: u32 = 0;
+        for i in 0..3u8 {
+            let payload = [0xA0 | i; 4];
+            let frame_len = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
+            let hdr = make_data_header(frame_len, t1_offset as i32, 42, 7, 1);
+            t1_offset = recv.append_frame(term1_pidx, t1_offset, &hdr, &payload)
+                .expect("append in term 1");
+        }
+
+        // Advance receiver position to cover both terms.
+        let total_position = tl as i64 + t1_offset as i64;
+        recv.advance_receiver_position(total_position);
+
+        // Poll term 0 - should get all 8 frames.
+        let mut term0_count = 0i32;
+        term0_count += sub.poll_fragments(|_, sid, stid| {
+            assert_eq!(sid, 42);
+            assert_eq!(stid, 7);
+        }, 100);
+        assert_eq!(term0_count, frames_per_term as i32, "should poll all term 0 frames");
+        assert_eq!(sub.position(), tl as i64, "position should be at term boundary");
+
+        // Poll term 1 - subscriber should automatically rotate to partition 1.
+        let mut term1_payloads = Vec::new();
+        let term1_count = sub.poll_fragments(|data, _, _| {
+            term1_payloads.push(data[0]);
+        }, 100);
+        assert_eq!(term1_count, 3, "should poll 3 frames from term 1");
+        assert_eq!(term1_payloads, vec![0xA0, 0xA1, 0xA2]);
+        assert_eq!(
+            sub.position(),
+            total_position,
+            "final position should match receiver position"
+        );
+
+        // One more poll should find nothing.
+        let empty = sub.poll_fragments(|_, _, _| panic!("no more"), 10);
+        assert_eq!(empty, 0);
+    }
+
+    #[test]
+    fn term_rotation_multi_term_jump() {
+        // Verify subscriber can jump across multiple terms (0 -> 1 -> 2).
+        let tl: u32 = 128; // 128 / 32 = 4 frames per partition
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0)
+            .expect("valid params");
+
+        let frames_per_term = (tl / FRAME_ALIGNMENT as u32) as usize;
+
+        // Fill partition 0 (term 0).
+        let mut offset: u32 = 0;
+        for _ in 0..frames_per_term {
+            let hdr = make_data_header(DATA_HEADER_LENGTH as i32, offset as i32, 42, 7, 0);
+            offset = recv.append_frame(0, offset, &hdr, &[]).expect("p0");
+        }
+
+        // Fill partition 1 (term 1).
+        recv.clean_partition(1);
+        let mut t1_off: u32 = 0;
+        for _ in 0..frames_per_term {
+            let hdr = make_data_header(DATA_HEADER_LENGTH as i32, t1_off as i32, 42, 7, 1);
+            t1_off = recv.append_frame(1, t1_off, &hdr, &[]).expect("p1");
+        }
+
+        // Write 2 frames into partition 2 (term 2).
+        recv.clean_partition(2);
+        let mut t2_off: u32 = 0;
+        for _ in 0..2 {
+            let hdr = make_data_header(DATA_HEADER_LENGTH as i32, t2_off as i32, 42, 7, 2);
+            t2_off = recv.append_frame(2, t2_off, &hdr, &[]).expect("p2");
+        }
+
+        let total_pos = (tl as i64) * 2 + t2_off as i64;
+        recv.advance_receiver_position(total_pos);
+
+        // Poll through all three terms.
+        let mut grand_total = 0i32;
+
+        // Term 0.
+        grand_total += sub.poll_fragments(|_, _, _| {}, 100);
+        assert_eq!(grand_total, frames_per_term as i32);
+
+        // Term 1.
+        grand_total += sub.poll_fragments(|_, _, _| {}, 100);
+        assert_eq!(grand_total, (frames_per_term * 2) as i32);
+
+        // Term 2.
+        grand_total += sub.poll_fragments(|_, _, _| {}, 100);
+        assert_eq!(grand_total, (frames_per_term * 2 + 2) as i32);
+
+        assert_eq!(sub.position(), total_pos);
+    }
+
+    #[test]
+    fn term_rotation_with_nonzero_initial_term_id() {
+        // Verify partition_index math works with initial_term_id != 0.
+        let tl: u32 = 128;
+        let initial_term_id = 100;
+        let (mut recv, mut sub) = new_shared_image(42, 7, initial_term_id, initial_term_id, tl, 0)
+            .expect("valid params");
+
+        let frames_per_term = (tl / FRAME_ALIGNMENT as u32) as usize;
+
+        // Partition for term 100 is partition_index(100, 100) = 0.
+        let p0 = partition_index(initial_term_id, initial_term_id);
+        assert_eq!(p0, 0);
+
+        // Fill partition 0 (term 100).
+        let mut offset: u32 = 0;
+        for _ in 0..frames_per_term {
+            let hdr = make_data_header(
+                DATA_HEADER_LENGTH as i32, offset as i32, 42, 7, initial_term_id,
+            );
+            offset = recv.append_frame(p0, offset, &hdr, &[]).expect("p0");
+        }
+
+        // Write 1 frame into partition 1 (term 101).
+        let p1 = partition_index(initial_term_id + 1, initial_term_id);
+        assert_eq!(p1, 1);
+        recv.clean_partition(p1);
+        let payload = [0xFF; 4];
+        let frame_len = DATA_HEADER_LENGTH as i32 + 4;
+        let hdr = make_data_header(
+            frame_len, 0, 42, 7, initial_term_id + 1,
+        );
+        let t1_end = recv.append_frame(p1, 0, &hdr, &payload).expect("p1");
+
+        let total_pos = tl as i64 + t1_end as i64;
+        recv.advance_receiver_position(total_pos);
+
+        // Poll term 100.
+        let c0 = sub.poll_fragments(|_, _, _| {}, 100);
+        assert_eq!(c0, frames_per_term as i32);
+
+        // Poll term 101 - should get 1 frame with correct payload.
+        let mut got_payload = Vec::new();
+        let c1 = sub.poll_fragments(|data, _, _| {
+            got_payload.extend_from_slice(data);
+        }, 100);
+        assert_eq!(c1, 1);
+        assert_eq!(&got_payload, &[0xFF; 4]);
     }
 
     #[test]

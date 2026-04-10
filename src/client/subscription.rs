@@ -117,14 +117,15 @@ impl Subscription {
             if self.image_count >= MAX_SUB_IMAGES {
                 break;
             }
-            if let Some(pending) = self.sub_bridge.try_take(idx) {
-                if pending.stream_id == self.stream_id {
-                    self.images[self.image_count] = Some(pending.image);
-                    self.image_count += 1;
+            // Peek first - only take items matching our stream_id.
+            // Non-matching items are left for other subscriptions.
+            if let Some(stream) = self.sub_bridge.peek_stream_id(idx) {
+                if stream == self.stream_id {
+                    if let Some(pending) = self.sub_bridge.try_take(idx) {
+                        self.images[self.image_count] = Some(pending.image);
+                        self.image_count += 1;
+                    }
                 }
-                // If stream_id doesn't match, the image is for a different
-                // subscription. For v1 with single bridge, this should not
-                // happen. The image handle is dropped (Arc refcount decrements).
             }
         }
     }

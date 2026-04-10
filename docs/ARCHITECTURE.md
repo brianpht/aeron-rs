@@ -932,11 +932,10 @@ flowchart TD
 - [x] Loss recovery (NAK-driven retransmit with delay/linger)
 - [x] RTT measurement (RTTM echo)
 - [x] 3-phase idle strategy (spin/yield/park)
+- [x] Subscription data path (SharedImage + SubscriptionBridge + Subscription::poll)
 
 ### Not Yet Implemented
 
-- [ ] **Subscription data path** - `Subscription::poll()` is stubbed. Requires shared-memory image buffers between
-  receiver agent and client (mmap-backed)
 - [ ] **Multi-destination cast (MDC)** - dynamic control mode, multiple destinations
 - [ ] **Congestion control** - currently static receiver window
 - [ ] **Counters file** - position limit counter, channel status indicator
