@@ -30,7 +30,7 @@ const BENCH_MTU: u32 = 1408;
 
 // ──────────────────── Helpers ────────────────────
 
-fn make_poller_and_transport() -> (UringTransportPoller, usize) {
+fn make_poller_and_transport() -> (UringTransportPoller, usize, UdpChannelTransport) {
     let ctx = DriverContext {
         uring_ring_size: 256,
         uring_recv_slots_per_transport: 4,
@@ -43,9 +43,7 @@ fn make_poller_and_transport() -> (UringTransportPoller, usize) {
     let remote = channel.remote_data;
     let mut transport = UdpChannelTransport::open(&channel, &local, &remote, &ctx).unwrap();
     let t_idx = poller.add_transport(&mut transport).unwrap();
-    // Keep transport alive - leak it (bench scope).
-    std::mem::forget(transport);
-    (poller, t_idx)
+    (poller, t_idx, transport)
 }
 
 fn make_publication() -> NetworkPublication {
@@ -89,7 +87,7 @@ fn bench_offer_frame_build(c: &mut Criterion) {
 /// Full offer path: slot alloc + prepare_send + SQE push via submit_send.
 /// Each iteration drains CQEs to recycle send slots.
 fn bench_offer_with_submit(c: &mut Criterion) {
-    let (mut poller, t_idx) = make_poller_and_transport();
+    let (mut poller, t_idx, _transport) = make_poller_and_transport();
 
     let mut scratch = [0u8; DATA_HEADER_LENGTH];
     let hdr = DataHeader {

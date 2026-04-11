@@ -46,6 +46,8 @@ fn build_data_frame() -> [u8; DATA_HEADER_LENGTH] {
 
 struct TestFixture {
     poller: UringTransportPoller,
+    /// Kept alive so the socket fd remains valid for the poller.
+    _transport: UdpChannelTransport,
     sender: UdpSocket,
     bound: SocketAddr,
     frame: [u8; DATA_HEADER_LENGTH],
@@ -65,14 +67,13 @@ fn make_fixture(recv_slots: usize) -> TestFixture {
     let mut transport = UdpChannelTransport::open(&channel, &local, &remote, &ctx).unwrap();
     let bound = transport.bound_addr;
     let _t_idx = poller.add_transport(&mut transport).unwrap();
-    // Leak transport to keep fd alive for the bench lifetime.
-    std::mem::forget(transport);
 
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     let frame = build_data_frame();
 
     TestFixture {
         poller,
+        _transport: transport,
         sender,
         bound,
         frame,

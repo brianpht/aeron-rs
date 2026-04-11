@@ -15,15 +15,17 @@ The entire I/O path runs through `io_uring` with multishot receive and provided 
 - **Allocation-Free Hot Path**: All buffers pre-allocated at init; zero heap allocation in steady state
 - **Single-Threaded Agents**: One thread per agent, one io_uring ring per agent - no locks, no contention
 - **Aeron Wire Protocol**: Full frame parsing (Data, SM, NAK, Setup, RTTM, Heartbeat) in < 0.5 ns
-- **Sub-Microsecond Offer Path**: ~8 ns from frame build to SQE push (userspace)
-- **High Throughput**: >= 3 M msg/s with 1408-byte frames on commodity hardware
+- **Sub-10ns Offer Path**: ~8.6 ns offer (empty), ~10.2 ns offer (64B) into term buffer
+- **Sub-10ns Poll Path**: ~9.4 ns per fragment, ~7.6 ns/fragment batched (16 frames)
 - **Cache-Oriented**: 64-byte aligned slots, stack-local CQE batching, flat-array dispatch
 - **CnC IPC**: mmap'd Command-and-Control region (anonymous or file-backed) with MPSC ring buffer + broadcast
 - **3-Agent Thread Model**: Conductor, Sender, Receiver agents on dedicated threads with lock-free SPSC command queues
 - **Client Library**: `MediaDriver::launch` + `Aeron` client with `add_publication` / `add_subscription` API
 - **Cross-Thread Publication**: `ConcurrentPublication` via `Arc<SharedLogBuffer>` + Release/Acquire atomic frame-length commit
+- **Subscription Data Path**: `SharedImage` + `SubscriptionBridge` (lock-free SPSC) + `Subscription::poll` for cross-thread data delivery
 - **Flow Control**: Sender-limit from Status Messages (consumption_position + receiver_window)
 - **Loss Recovery**: NAK-driven retransmit with delay/linger state machine (pre-sized flat array, zero-alloc)
+- **Subscriber Gap-Skip**: Unrecoverable gaps detected via receiver_position, scanned forward to next committed frame (ADR-002)
 - **RTT Measurement**: RTTM echo with EWMA smoothed RTT (shift-based, no division)
 
 ## Requirements
@@ -65,7 +67,7 @@ let mut pub_h = aeron
 pub_h.offer(&[1, 2, 3, 4]).expect("offer");
 
 // Keep the driver alive with heartbeats.
-aeron.heartbeat().expect("heartbeat");
+aeron.heartbeat();
 
 // Shutdown.
 drop(aeron);
@@ -190,14 +192,15 @@ The driver implements the Aeron media layer with three dedicated agent threads a
 
 1. **Conductor Agent**: Reads client commands from CnC (add/remove publication/subscription, keepalive), dispatches to sender/receiver via internal SPSC queues, writes responses via broadcast buffer
 2. **Sender Agent**: Scans publications for committed frames, sends data/heartbeat/setup/RTTM via io_uring, receives SM/NAK control messages, drives retransmit handler
-3. **Receiver Agent**: Receives data frames via multishot io_uring, dispatches to images (O(1) hash lookup), detects gaps and schedules NAKs, sends SM/NAK/RTTM replies
-4. **Client Library**: `Aeron` client uses CnC ring buffer for commands and `PublicationBridge` (lock-free SPSC) to transfer publications to the sender; cross-thread `offer()` via `Arc<SharedLogBuffer>` + atomic frame-length commit
+3. **Receiver Agent**: Receives data frames via multishot io_uring, dispatches to images (O(1) hash lookup), detects gaps and schedules NAKs, sends SM/NAK/RTTM replies, deposits images to subscriptions via lock-free bridge
+4. **Client Library**: `Aeron` client uses CnC ring buffer for commands and `PublicationBridge` (lock-free SPSC) to transfer publications to the sender; cross-thread `offer()` via `Arc<SharedLogBuffer>` + atomic frame-length commit; `Subscription::poll()` reads from `SharedImage` buffers discovered via `SubscriptionBridge`
 
 ```mermaid
 flowchart LR
     subgraph App["Application Thread"]
         Aeron["Aeron Client"]
         Pub["Publication::offer()"]
+        Sub["Subscription::poll()"]
     end
     subgraph Driver["Media Driver"]
         Conductor["ConductorAgent"]
@@ -213,6 +216,7 @@ flowchart LR
     Conductor -->|"SPSC queue"| Sender
     Conductor -->|"SPSC queue"| Receiver
     Pub -->|"Arc shared log"| Sender
+    Receiver -->|"SubscriptionBridge"| Sub
     Sender -->|"SQE"| Ring1
     Ring1 -->|"CQE"| Sender
     Receiver -->|"SQE"| Ring2
@@ -251,6 +255,8 @@ let ctx = DriverContext {
     nak_delay_ns: 60_000_000,               // NAK delay (60 ms)
     rttm_interval_ns: 1_000_000_000,        // RTTM interval (1 s)
     max_receiver_images: 256,               // Max concurrent images [1, 256]
+    receiver_window: None,                  // SM window override (None = term_length / 2)
+    send_sm_on_data: false,                 // Immediate SM after data (Aeron C SEND_SM_ON_DATA)
 
     // General
     driver_timeout_ns: 10_000_000_000,      // Client liveness timeout (10 s)
@@ -299,7 +305,7 @@ if let Some(hdr) = FrameHeader::parse(&buf) {
 
 ## Performance
 
-Benchmarks on x86_64 Linux (Criterion):
+Benchmarks on x86_64 Linux (Criterion). See [docs/performance_design.md](docs/performance_design.md) for full results.
 
 ### Userspace Operations
 
@@ -311,31 +317,74 @@ Benchmarks on x86_64 Linux (Criterion):
 | NAK build + write               | ~1.5 ns    |
 | Frame build (DataHeader)        | ~1.5 ns    |
 | SlotPool alloc + free           | ~3.0 ns    |
-| SQE push (alloc + prepare)      | ~3.8 ns    |
-| Heartbeat build + submit        | ~4.5 ns    |
-| CQE dispatch (single msg)       | ~13.7 ns   |
-| CQE dispatch (16 msg burst)     | ~20.5 ns   |
-| CQE batch iterate (256 CQEs)    | ~200 ns    |
+| CQE dispatch (single msg)       | ~19 ns     |
+| CQE dispatch (16 msg burst)     | ~26 ns     |
+| CQE batch iterate (256 CQEs)    | ~199 ns    |
+
+### Publication & Scan Path
+
+| Operation                                  | Latency    |
+|--------------------------------------------|------------|
+| offer (empty payload)                      | ~8.6 ns    |
+| offer (64B payload)                        | ~10.2 ns   |
+| offer (1KiB payload)                       | ~31.5 ns   |
+| sender_scan (1 frame)                      | ~9.6 ns    |
+| sender_scan (batch 16 frames)              | ~148 ns    |
+
+### Subscriber Poll Path
+
+| Operation                                  | Latency    |
+|--------------------------------------------|------------|
+| poll_fragments (empty - no data)           | ~1.4 ns    |
+| poll_fragments (single frame)              | ~9.4 ns    |
+| poll_fragments (batch 16 frames)           | ~122 ns (7.6 ns/fr) |
+| poll_fragments (batch 64 frames)           | ~549 ns (8.6 ns/fr) |
+| poll_fragments (gap skip, 1 gap in 16)     | ~73.6 ns   |
+| poll_fragments (pad frame skip)            | ~51.9 ns   |
 
 ### io_uring Kernel Roundtrip
 
 | Operation                       | Latency    |
 |---------------------------------|------------|
-| Multishot recv reap + recycle   | ~14.8 ns   |
-| submit() empty ring             | ~65 ns     |
-| NOP submit + reap (single)      | ~163 ns    |
-| NOP submit + reap (burst 16)    | ~371 ns    |
-| UDP sendmsg + reap              | ~874 ns    |
+| Multishot recv reap + recycle   | ~12 ns     |
+| submit() empty ring             | ~66 ns    |
+| NOP submit + reap (single)      | ~159 ns    |
+| NOP submit + reap (burst 16)    | ~337 ns    |
+| UDP sendmsg + reap              | ~994 ns    |
+| UDP sendmsg + reap (burst 16)   | ~13.7 us   |
+| UDP recvmsg reap + rearm + submit | ~1.5 us  |
+
+### End-to-End (Threaded)
+
+| Metric                       | Measured     | Target    | Status |
+|------------------------------|-------------|-----------|--------|
+| ping_pong p50 RTT            | ~5.82 us    | < 15 us   | PASS   |
+| ping_pong p99 RTT            | ~10.75 us   | < 50 us   | PASS   |
+| ping_pong p99.9 RTT          | ~26.56 us   | < 100 us  | PASS   |
+| Throughput (send rate)       | ~700K msg/s | >= 500K   | PASS   |
 
 ### System-Level Targets
 
 | Metric                       | Target          | Status |
 |------------------------------|-----------------|--------|
-| Throughput (1408B frames)    | >= 3 M msg/s     | PASS   |
 | Steady-state allocation      | Zero             | PASS   |
 | Syscalls per duty cycle      | 0-1              | PASS   |
-| Offer path (userspace)       | < 25 ns          | PASS (~8 ns) |
-| Recv path (multishot)        | < 35 ns          | PASS (~14 ns) |
+| Offer path (userspace)       | < 25 ns          | PASS (~8.6 ns) |
+| Recv path (multishot)        | < 35 ns          | PASS (~12 ns) |
+
+### Aeron C Comparison
+
+Per-fragment operations (offer, poll, scan) are 4-9x faster than Aeron C reference. Threaded RTT (ping_pong) is 1.4-2x faster. See [docs/performance_design.md](docs/performance_design.md) for the full comparison table and caveats.
+
+| Category                 | aeron-rs       | Aeron C        | Delta      |
+|--------------------------|----------------|----------------|------------|
+| RTT p50 (threaded)       | ~5.82 us       | ~8-12 us       | 1.4-2.1x   |
+| RTT p99 (threaded)       | ~10.75 us      | ~15-20 us      | 1.4-1.9x   |
+| offer() 64B              | ~10.2 ns       | ~40-80 ns      | 4-8x       |
+| poll single frame        | ~9.4 ns        | ~40-60 ns      | 4-6x       |
+| poll batch 16 (per-fr)   | ~7.6 ns        | ~40-60 ns      | 5-8x       |
+| Throughput (threaded)    | ~700K msg/s    | ~2-3 M msg/s   | 0.23-0.35x |
+| recv (multishot)         | ~12 ns         | ~1-2 us (epoll) | 80-170x   |
 
 ## Performance Design
 
@@ -351,6 +400,7 @@ This driver is built with deterministic, low-latency performance as a core desig
 - **O(1) image lookup**: Pre-sized `[u16; 256]` hash table with bitmask probing, not `HashMap`
 - **Wrapping arithmetic**: All sequence/term comparisons use `wrapping_sub` + half-range check
 - **Little-endian wire format**: `repr(C, packed)` overlay parsing - zero byte-swap on x86_64
+- **Subscriber gap-skip**: Forward scan past unrecoverable gaps in poll_fragments (ADR-002)
 
 For detailed performance design principles, architecture decisions, and optimization guidelines, see [docs/performance_design.md](docs/performance_design.md). For the full architecture overview, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -366,13 +416,11 @@ cargo run --example send_heartbeat
 # Receiver agent (listens for data)
 cargo run --example recv_data
 
-# Ping-pong RTT measurement (io_uring -> std echo)
-cargo run --example ping_pong
+# Ping-pong RTT measurement (threaded, 2-hop through full stack)
+cargo run --release --example ping_pong
+cargo run --release --example ping_pong -- --warmup 5000 --samples 100000
 
-# Diagnostic ping (driver-level connectivity check)
-cargo run --example diag_ping
-
-# Throughput measurement (>= 3 M msg/s target)
+# Throughput measurement (threaded, burst send + poll)
 cargo run --release --example throughput
 cargo run --release --example throughput -- --duration 10 --burst 128
 ```
@@ -380,13 +428,16 @@ cargo run --release --example throughput -- --duration 10 --burst 128
 ## Running Tests
 
 ```sh
-# Unit tests
+# Unit tests (380 lib tests)
 cargo test
 
 # Integration tests (requires Linux with io_uring)
 cargo test -- --test-threads=1
 
-# Benchmarks
+# All 446 tests
+cargo test && cargo test -- --test-threads=1
+
+# Benchmarks (12 bench files, Criterion)
 cargo bench
 ```
 
@@ -413,11 +464,12 @@ src/
 |   +-- cnc_file.rs                 # CnC mmap region (DriverCnc + ClientCnc, anonymous or file-backed)
 +-- client/
 |   +-- mod.rs                      # ClientError, re-exports
-|   +-- media_driver.rs             # MediaDriver (launches 3 agent threads, creates CnC + bridge)
+|   +-- media_driver.rs             # MediaDriver (launches 3 agent threads, creates CnC + bridges)
 |   +-- aeron.rs                    # Aeron client (add_publication, add_subscription, heartbeat)
 |   +-- bridge.rs                   # PublicationBridge (lock-free SPSC, 32 slots, AtomicU8 state)
 |   +-- publication.rs              # Publication (user-facing offer handle, wraps ConcurrentPublication)
-|   +-- subscription.rs             # Subscription (registration tracking, data path stubbed)
+|   +-- subscription.rs             # Subscription (poll via SharedImage, gap-skip, pad-skip)
+|   +-- sub_bridge.rs               # SubscriptionBridge + RecvEndpointBridge (lock-free SPSC)
 +-- media/
     +-- mod.rs                      # Media layer module exports
     +-- channel.rs                  # Aeron URI parsing (aeron:udp?endpoint=...)
@@ -428,10 +480,13 @@ src/
     +-- term_buffer.rs              # RawLog + SharedLogBuffer (4 partitions, ADR-001)
     +-- network_publication.rs      # NetworkPublication (single-thread offer/scan/rotation)
     +-- concurrent_publication.rs   # Cross-thread offer/scan (atomic frame-length commit)
+    +-- shared_image.rs             # SharedImage (cross-thread recv->subscriber, atomic commit)
     +-- retransmit_handler.rs       # NAK-driven retransmit scheduler (delay/linger, flat array)
     +-- send_channel_endpoint.rs    # Send endpoint (heartbeat, setup, SM/NAK/RTTM queues)
     +-- receive_channel_endpoint.rs # Recv endpoint (data dispatch, SM/NAK generation)
 ```
+
+~17,000 lines of Rust, 446 tests (380 lib + 66 integration), 12 benchmarks, 5 examples.
 
 For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

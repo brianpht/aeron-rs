@@ -17,6 +17,7 @@
 - [x] Run Tier 1 examples (`ping_pong`, `throughput`) for threaded comparison
 - [x] Investigate throughput FAIL (back-pressure / send-slot saturation)
 - [x] Run Tier 2 benchmarks (`io_uring_submit`, `cqe_dispatch`)
+- [x] Fix `mem::forget` leak in `cqe_dispatch.rs` and `publication_offer.rs`
 
 ## Work Completed
 
@@ -206,7 +207,7 @@ Confirmed via xxd that reported values are microseconds, not seconds.
 |-------|------------|----------|
 | `BatchSize::SmallInput` caused ~3.9s gap/pad bench results | Changed to `BatchSize::PerIteration` - results dropped to ~71 ns / ~53 ns | No |
 | `unsafe_op_in_unsafe_fn` warning on `log_ptr()` | Wrapped body in `unsafe { }` block (Rust 2024 edition requirement) | No |
-| `mem::forget(transport)` leak in `cqe_dispatch.rs` and `publication_offer.rs` | Deferred - low priority, bench-only code | No |
+| `mem::forget(transport)` leak in `cqe_dispatch.rs` and `publication_offer.rs` | Fixed - stored transport in struct/return tuple so fd stays alive and drops cleanly | No |
 
 ## Benchmark Execution Plan
 
@@ -325,7 +326,7 @@ Threaded throughput (tuned) is ~700K msg/s - 0.23-0.35x Aeron C (PASS).
 4. ~~**Medium:** Run Tier 2 benchmarks (`io_uring_submit`, `cqe_dispatch`)~~ DONE
 5. ~~**Medium:** Collect all results into Aeron C comparison table~~ DONE
 6. ~~**Medium:** Update `docs/performance_design.md` with `poll_fragments` numbers and comparison table~~ DONE
-7. **Low:** Fix `mem::forget` leak in `cqe_dispatch.rs` and `publication_offer.rs`
+7. ~~**Low:** Fix `mem::forget` leak in `cqe_dispatch.rs` and `publication_offer.rs`~~ DONE
 
 ## Files Changed
 
