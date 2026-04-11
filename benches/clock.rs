@@ -38,6 +38,10 @@ fn bench_cached_clock_update(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_nano_clock, bench_cached_clock_cached, bench_cached_clock_update);
+criterion_group!(
+    benches,
+    bench_nano_clock,
+    bench_cached_clock_cached,
+    bench_cached_clock_update
+);
 criterion_main!(benches);
-

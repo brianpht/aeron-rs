@@ -3,8 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 use std::str::FromStr;
 
 /// Unspecified IPv4/IPv6 socket addresses for local binding (port 0).
-const UNSPECIFIED_V4: SocketAddr =
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
+const UNSPECIFIED_V4: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
 const UNSPECIFIED_V6: SocketAddr =
     SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
 
@@ -77,9 +76,7 @@ impl UdpChannel {
             .get("interface")
             .and_then(|s| IpAddr::from_str(s).ok());
 
-        let multicast_ttl = params
-            .get("ttl")
-            .and_then(|s| s.parse::<u8>().ok());
+        let multicast_ttl = params.get("ttl").and_then(|s| s.parse::<u8>().ok());
 
         let control_mode = params.get("control-mode").map(|s| s.as_str());
 
@@ -135,7 +132,8 @@ mod tests {
 
     #[test]
     fn parse_multicast() {
-        let ch = UdpChannel::parse("aeron:udp?endpoint=224.0.1.1:40456|interface=192.168.1.5").unwrap();
+        let ch =
+            UdpChannel::parse("aeron:udp?endpoint=224.0.1.1:40456|interface=192.168.1.5").unwrap();
         assert!(ch.is_multicast);
         assert_eq!(ch.interface_addr, Some(IpAddr::from([192, 168, 1, 5])));
     }

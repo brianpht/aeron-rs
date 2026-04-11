@@ -8,8 +8,8 @@
 
 #[cfg(target_os = "linux")]
 mod concurrent_offer {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
     use aeron_rs::media::concurrent_publication::new_concurrent;
@@ -22,8 +22,8 @@ mod concurrent_offer {
 
     #[test]
     fn offer_scan_roundtrip_single_thread() {
-        let (mut pub_h, mut send_h) = new_concurrent(42, 7, 0, TERM_LENGTH, MTU)
-            .expect("valid params");
+        let (mut pub_h, mut send_h) =
+            new_concurrent(42, 7, 0, TERM_LENGTH, MTU).expect("valid params");
 
         let payload = [0xDE, 0xAD, 0xBE, 0xEF];
         pub_h.offer(&payload).expect("offer");
@@ -42,8 +42,8 @@ mod concurrent_offer {
     #[test]
     fn frame_commit_visible_cross_thread() {
         // Publisher on thread A, scanner on thread B.
-        let (mut pub_h, mut send_h) = new_concurrent(99, 5, 0, TERM_LENGTH, MTU)
-            .expect("valid params");
+        let (mut pub_h, mut send_h) =
+            new_concurrent(99, 5, 0, TERM_LENGTH, MTU).expect("valid params");
 
         let done = Arc::new(AtomicBool::new(false));
         let done_clone = Arc::clone(&done);
@@ -55,11 +55,11 @@ mod concurrent_offer {
             while offered < 100 {
                 match pub_h.offer(&payload) {
                     Ok(_) => offered += 1,
-                    Err(OfferError::AdminAction) => {},
+                    Err(OfferError::AdminAction) => {}
                     Err(OfferError::BackPressured) => {
                         // Spin-wait for sender to catch up.
                         thread::yield_now();
-                    },
+                    }
                     Err(e) => panic!("unexpected offer error: {e}"),
                 }
             }
@@ -89,8 +89,8 @@ mod concurrent_offer {
     #[test]
     fn sustained_throughput_no_corruption() {
         // Offer 10_000 messages with checksum payload, verify no corruption.
-        let (mut pub_h, mut send_h) = new_concurrent(42, 7, 0, TERM_LENGTH, MTU)
-            .expect("valid params");
+        let (mut pub_h, mut send_h) =
+            new_concurrent(42, 7, 0, TERM_LENGTH, MTU).expect("valid params");
 
         let msg_count = 10_000u32;
         let done = Arc::new(AtomicBool::new(false));
@@ -104,16 +104,22 @@ mod concurrent_offer {
                 let idx_bytes = offered.to_le_bytes();
                 let check_bytes = (!offered).to_le_bytes();
                 let payload = [
-                    idx_bytes[0], idx_bytes[1], idx_bytes[2], idx_bytes[3],
-                    check_bytes[0], check_bytes[1], check_bytes[2], check_bytes[3],
+                    idx_bytes[0],
+                    idx_bytes[1],
+                    idx_bytes[2],
+                    idx_bytes[3],
+                    check_bytes[0],
+                    check_bytes[1],
+                    check_bytes[2],
+                    check_bytes[3],
                 ];
 
                 match pub_h.offer(&payload) {
                     Ok(_) => offered += 1,
-                    Err(OfferError::AdminAction) => {},
+                    Err(OfferError::AdminAction) => {}
                     Err(OfferError::BackPressured) => {
                         thread::yield_now();
-                    },
+                    }
                     Err(e) => panic!("unexpected offer error: {e}"),
                 }
             }
@@ -134,7 +140,10 @@ mod concurrent_offer {
                     "checksum mismatch at msg {idx}: expected {}, got {check}",
                     !idx
                 );
-                assert_eq!(idx, next_expected, "out-of-order: expected {next_expected}, got {idx}");
+                assert_eq!(
+                    idx, next_expected,
+                    "out-of-order: expected {next_expected}, got {idx}"
+                );
                 next_expected += 1;
             });
 
@@ -154,28 +163,32 @@ mod concurrent_offer {
     fn back_pressure_blocks_publisher() {
         // Tiny term (64 bytes) - publisher should get BackPressured quickly
         // if sender doesn't scan.
-        let (mut pub_h, mut send_h) = new_concurrent(1, 1, 0, 64, MTU)
-            .expect("valid params");
+        let (mut pub_h, mut send_h) = new_concurrent(1, 1, 0, 64, MTU).expect("valid params");
 
         let mut back_pressured = false;
         for _ in 0..100 {
             match pub_h.offer(&[]) {
-                Ok(_) => {},
-                Err(OfferError::AdminAction) => {},
+                Ok(_) => {}
+                Err(OfferError::AdminAction) => {}
                 Err(OfferError::BackPressured) => {
                     back_pressured = true;
                     break;
-                },
+                }
                 Err(e) => panic!("unexpected: {e}"),
             }
         }
-        assert!(back_pressured, "publisher should get back-pressured with tiny term");
+        assert!(
+            back_pressured,
+            "publisher should get back-pressured with tiny term"
+        );
 
         // Scan to free space.
         let mut freed = 0u32;
         loop {
             let s = send_h.sender_scan(u32::MAX, |_, _| {});
-            if s == 0 { break; }
+            if s == 0 {
+                break;
+            }
             freed += s;
         }
         assert!(freed > 0, "sender should scan some frames");
@@ -184,8 +197,11 @@ mod concurrent_offer {
         let mut success = false;
         for _ in 0..4 {
             match pub_h.offer(&[]) {
-                Ok(_) => { success = true; break; },
-                Err(OfferError::AdminAction) => {},
+                Ok(_) => {
+                    success = true;
+                    break;
+                }
+                Err(OfferError::AdminAction) => {}
                 Err(e) => panic!("unexpected after scan: {e}"),
             }
         }
@@ -196,22 +212,21 @@ mod concurrent_offer {
 
     #[test]
     fn sender_agent_concurrent_publication() {
-        use std::net::SocketAddr;
         use aeron_rs::agent::Agent;
         use aeron_rs::agent::sender::SenderAgent;
         use aeron_rs::context::DriverContext;
         use aeron_rs::media::channel::UdpChannel;
         use aeron_rs::media::send_channel_endpoint::SendChannelEndpoint;
         use aeron_rs::media::transport::UdpChannelTransport;
+        use std::net::SocketAddr;
 
         let ctx = DriverContext::default();
         let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").unwrap();
         let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let remote_addr = channel.remote_data;
 
-        let transport =
-            UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
-                .expect("transport open");
+        let transport = UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
+            .expect("transport open");
 
         let endpoint = SendChannelEndpoint::new(channel, transport);
         let mut agent = SenderAgent::new(&ctx).expect("sender agent");
@@ -228,7 +243,9 @@ mod concurrent_offer {
 
         // Run sender duty cycle - should scan and send the frame.
         let work = agent.do_work().expect("do_work");
-        assert!(work > 0, "expected work_count > 0 after concurrent offer, got {work}");
+        assert!(
+            work > 0,
+            "expected work_count > 0 after concurrent offer, got {work}"
+        );
     }
 }
-

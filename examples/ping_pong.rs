@@ -67,7 +67,9 @@ fn main() {
                 samples = args[i + 1].parse().unwrap_or(DEFAULT_SAMPLES);
                 i += 2;
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -83,8 +85,8 @@ fn main() {
         // More spinning and shorter parks reduce agent wake-up jitter.
         idle_strategy_max_spins: 100,
         idle_strategy_max_yields: 50,
-        idle_strategy_min_park_ns: 100,       // 100 ns
-        idle_strategy_max_park_ns: 10_000,    // 10 us
+        idle_strategy_min_park_ns: 100,    // 100 ns
+        idle_strategy_max_park_ns: 10_000, // 10 us
         ..DriverContext::default()
     };
 

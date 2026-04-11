@@ -33,9 +33,8 @@ mod uring_loopback {
         let local_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let remote_addr = channel.remote_data;
 
-        let mut transport =
-            UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
-                .expect("transport open");
+        let mut transport = UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
+            .expect("transport open");
 
         let bound_addr = transport.bound_addr;
 
@@ -100,4 +99,3 @@ mod uring_loopback {
         );
     }
 }
-

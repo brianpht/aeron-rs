@@ -15,9 +15,9 @@ mod rtt_completion {
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
+    use aeron_rs::agent::Agent;
     use aeron_rs::agent::receiver::ReceiverAgent;
     use aeron_rs::agent::sender::SenderAgent;
-    use aeron_rs::agent::Agent;
     use aeron_rs::context::DriverContext;
     use aeron_rs::frame::DATA_HEADER_LENGTH;
     use aeron_rs::media::channel::UdpChannel;
@@ -66,13 +66,12 @@ mod rtt_completion {
     }
 
     fn setup_agents_with_ctx(ctx: DriverContext) -> (SenderAgent, ReceiverAgent, usize) {
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+            .expect("open recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -94,8 +93,12 @@ mod rtt_completion {
         sender.add_endpoint(send_ep).expect("add send endpoint");
         let pub_idx = sender
             .add_publication(
-                0, SESSION_ID, STREAM_ID, INITIAL_TERM_ID,
-                ctx.term_buffer_length, BENCH_MTU,
+                0,
+                SESSION_ID,
+                STREAM_ID,
+                INITIAL_TERM_ID,
+                ctx.term_buffer_length,
+                BENCH_MTU,
             )
             .expect("add publication");
 
@@ -115,13 +118,12 @@ mod rtt_completion {
         ctx: DriverContext,
         initial_term_id: i32,
     ) -> (SenderAgent, ReceiverAgent, usize) {
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+            .expect("open recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -143,8 +145,12 @@ mod rtt_completion {
         sender.add_endpoint(send_ep).expect("add send endpoint");
         let pub_idx = sender
             .add_publication(
-                0, SESSION_ID, STREAM_ID, initial_term_id,
-                ctx.term_buffer_length, BENCH_MTU,
+                0,
+                SESSION_ID,
+                STREAM_ID,
+                initial_term_id,
+                ctx.term_buffer_length,
+                BENCH_MTU,
             )
             .expect("add publication");
 
@@ -327,10 +333,7 @@ mod rtt_completion {
 
         for i in 0..10 {
             let cycles = run_one_rtt(&mut sender, &mut receiver, pub_idx, &payload);
-            assert!(
-                cycles.is_some(),
-                "RTT #{i} should complete"
-            );
+            assert!(cycles.is_some(), "RTT #{i} should complete");
 
             let new_limit = sender.publication_sender_limit(pub_idx).unwrap_or(0);
             let diff = new_limit.wrapping_sub(prev_limit);
@@ -349,7 +352,8 @@ mod rtt_completion {
         let (sender, receiver, pub_idx) = setup_agents();
 
         assert_eq!(
-            receiver.image_count(), 1,
+            receiver.image_count(),
+            1,
             "receiver should have 1 image after warmup"
         );
         assert!(
@@ -406,10 +410,7 @@ mod rtt_completion {
         let payload = [0xDE, 0xAD, 0xBE, 0xEF];
 
         let cycles = run_one_rtt(&mut sender, &mut receiver, pub_idx, &payload);
-        assert!(
-            cycles.is_some(),
-            "small-payload RTT should complete"
-        );
+        assert!(cycles.is_some(), "small-payload RTT should complete");
     }
 
     // -- Edge case tests for bench publication behavior --
@@ -572,8 +573,7 @@ mod rtt_completion {
         };
         // Start 2 terms before i32::MAX so we cross the boundary quickly.
         let initial_term_id = i32::MAX - 2;
-        let (mut sender, mut receiver, pub_idx) =
-            setup_agents_full(ctx, initial_term_id);
+        let (mut sender, mut receiver, pub_idx) = setup_agents_full(ctx, initial_term_id);
         let payload = [0xCCu8; 4]; // aligned = 64 bytes, 16 frames per term
 
         let mut rotation_count = 0u32;
@@ -637,12 +637,11 @@ mod rtt_completion {
         };
 
         // Sender with transport (sends into the void).
-        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse channel");
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse channel");
         let local: SocketAddr = "0.0.0.0:0".parse().expect("parse local addr");
         let remote = channel.remote_data;
-        let transport = UdpChannelTransport::open(&channel, &local, &remote, &ctx)
-            .expect("transport open");
+        let transport =
+            UdpChannelTransport::open(&channel, &local, &remote, &ctx).expect("transport open");
 
         let endpoint = SendChannelEndpoint::new(channel, transport);
         let mut sender = SenderAgent::new(&ctx).expect("sender agent");
@@ -652,12 +651,11 @@ mod rtt_completion {
             .expect("add pub");
 
         // Disconnected receiver (listens on a different port).
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let recv_remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &recv_remote, &ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &recv_remote, &ctx)
+            .expect("open recv transport");
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
         let mut receiver = ReceiverAgent::new(&ctx).expect("receiver agent");
         receiver.add_endpoint(recv_ep).expect("add recv endpoint");

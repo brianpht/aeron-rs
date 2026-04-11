@@ -13,8 +13,8 @@
 
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
+use super::broadcast::{self, BroadcastReceiver, BroadcastTransmitter};
 use super::ring_buffer::{self, MpscRingBuffer};
-use super::broadcast::{self, BroadcastTransmitter, BroadcastReceiver};
 
 // ---- CnC Header ----
 
@@ -139,14 +139,14 @@ impl DriverCnc {
         }
         let base = base as *mut u8;
 
-        let result = unsafe {
-            Self::init(base, length, to_driver_capacity, to_clients_capacity)
-        };
+        let result = unsafe { Self::init(base, length, to_driver_capacity, to_clients_capacity) };
 
         match result {
             Ok(cnc) => Ok(cnc),
             Err(e) => {
-                unsafe { libc::munmap(base as *mut _, length); }
+                unsafe {
+                    libc::munmap(base as *mut _, length);
+                }
                 Err(e)
             }
         }
@@ -166,8 +166,7 @@ impl DriverCnc {
         let length = cnc_file_length(to_driver_capacity, to_clients_capacity);
 
         // Create/truncate the file.
-        let c_path = std::ffi::CString::new(path)
-            .map_err(|_| CncError::IoError(libc::EINVAL))?;
+        let c_path = std::ffi::CString::new(path).map_err(|_| CncError::IoError(libc::EINVAL))?;
 
         let fd = unsafe {
             libc::open(
@@ -183,7 +182,9 @@ impl DriverCnc {
         // Size the file.
         if unsafe { libc::ftruncate(fd, length as libc::off_t) } != 0 {
             let errno = unsafe { *libc::__errno_location() };
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             return Err(CncError::IoError(errno));
         }
 
@@ -198,21 +199,23 @@ impl DriverCnc {
                 0,
             )
         };
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
 
         if base == libc::MAP_FAILED {
             return Err(CncError::IoError(unsafe { *libc::__errno_location() }));
         }
         let base = base as *mut u8;
 
-        let result = unsafe {
-            Self::init(base, length, to_driver_capacity, to_clients_capacity)
-        };
+        let result = unsafe { Self::init(base, length, to_driver_capacity, to_clients_capacity) };
 
         match result {
             Ok(cnc) => Ok(cnc),
             Err(e) => {
-                unsafe { libc::munmap(base as *mut _, length); }
+                unsafe {
+                    libc::munmap(base as *mut _, length);
+                }
                 Err(e)
             }
         }
@@ -243,7 +246,9 @@ impl DriverCnc {
         to_clients_capacity: usize,
     ) -> Result<Self, CncError> {
         // Zero the entire region (mmap provides zeroed pages, but be safe).
-        unsafe { std::ptr::write_bytes(base, 0, length); }
+        unsafe {
+            std::ptr::write_bytes(base, 0, length);
+        }
 
         // Create ring buffer handles.
         let to_driver_ptr = unsafe { base.add(to_driver_offset()) };
@@ -383,22 +388,20 @@ impl ClientCnc {
         }
 
         let to_driver_capacity = unsafe { read_i32_raw(base, TO_DRIVER_CAPACITY_OFFSET) } as usize;
-        let to_clients_capacity = unsafe { read_i32_raw(base, TO_CLIENTS_CAPACITY_OFFSET) } as usize;
+        let to_clients_capacity =
+            unsafe { read_i32_raw(base, TO_CLIENTS_CAPACITY_OFFSET) } as usize;
 
         let to_driver_ptr = unsafe { base.add(to_driver_offset()) };
         let to_driver = unsafe { MpscRingBuffer::new(to_driver_ptr, to_driver_capacity) }
             .map_err(|_| CncError::InvalidCapacity)?;
 
         let to_clients_ptr = unsafe { base.add(to_clients_offset(to_driver_capacity)) };
-        let to_clients_tx_tmp = unsafe { BroadcastTransmitter::new(to_clients_ptr, to_clients_capacity) }
-            .map_err(|_| CncError::InvalidCapacity)?;
+        let to_clients_tx_tmp =
+            unsafe { BroadcastTransmitter::new(to_clients_ptr, to_clients_capacity) }
+                .map_err(|_| CncError::InvalidCapacity)?;
         let cursor = to_clients_tx_tmp.tail_counter();
         let to_clients_rx = unsafe {
-            BroadcastReceiver::new(
-                to_clients_ptr as *const u8,
-                to_clients_capacity,
-                cursor,
-            )
+            BroadcastReceiver::new(to_clients_ptr as *const u8, to_clients_capacity, cursor)
         };
 
         Ok(Self {
@@ -412,12 +415,9 @@ impl ClientCnc {
 
     /// Map an existing CnC file from the given filesystem path.
     pub fn map_file(path: &str) -> Result<Self, CncError> {
-        let c_path = std::ffi::CString::new(path)
-            .map_err(|_| CncError::IoError(libc::EINVAL))?;
+        let c_path = std::ffi::CString::new(path).map_err(|_| CncError::IoError(libc::EINVAL))?;
 
-        let fd = unsafe {
-            libc::open(c_path.as_ptr(), libc::O_RDWR)
-        };
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
         if fd < 0 {
             return Err(CncError::IoError(unsafe { *libc::__errno_location() }));
         }
@@ -426,7 +426,9 @@ impl ClientCnc {
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(fd, &mut stat) } != 0 {
             let errno = unsafe { *libc::__errno_location() };
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             return Err(CncError::IoError(errno));
         }
         let length = stat.st_size as usize;
@@ -441,7 +443,9 @@ impl ClientCnc {
                 0,
             )
         };
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
 
         if base == libc::MAP_FAILED {
             return Err(CncError::IoError(unsafe { *libc::__errno_location() }));
@@ -481,7 +485,9 @@ impl ClientCnc {
 impl Drop for ClientCnc {
     fn drop(&mut self) {
         if self.owns_memory && !self.base.is_null() {
-            unsafe { libc::munmap(self.base as *mut _, self.length); }
+            unsafe {
+                libc::munmap(self.base as *mut _, self.length);
+            }
             self.base = std::ptr::null_mut();
         }
     }
@@ -491,18 +497,24 @@ impl Drop for ClientCnc {
 
 fn current_epoch_ms() -> i64 {
     let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts); }
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
     ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000
 }
 
 unsafe fn write_i32_raw(base: *mut u8, offset: usize, val: i32) {
     let bytes = val.to_le_bytes();
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(offset), 4); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(offset), 4);
+    }
 }
 
 unsafe fn read_i32_raw(base: *const u8, offset: usize) -> i32 {
     let mut bytes = [0u8; 4];
-    unsafe { std::ptr::copy_nonoverlapping(base.add(offset), bytes.as_mut_ptr(), 4); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(base.add(offset), bytes.as_mut_ptr(), 4);
+    }
     i32::from_le_bytes(bytes)
 }
 
@@ -515,8 +527,7 @@ mod tests {
 
     #[test]
     fn create_anonymous_cnc() {
-        let cnc = DriverCnc::create_anonymous(TEST_TO_DRIVER, TEST_TO_CLIENTS)
-            .expect("create");
+        let cnc = DriverCnc::create_anonymous(TEST_TO_DRIVER, TEST_TO_CLIENTS).expect("create");
         assert_eq!(cnc.to_driver_capacity(), TEST_TO_DRIVER);
         assert_eq!(cnc.to_clients_capacity(), TEST_TO_CLIENTS);
     }
@@ -535,37 +546,31 @@ mod tests {
 
     #[test]
     fn client_maps_driver_cnc() {
-        let cnc = DriverCnc::create_anonymous(TEST_TO_DRIVER, TEST_TO_CLIENTS)
-            .expect("create");
+        let cnc = DriverCnc::create_anonymous(TEST_TO_DRIVER, TEST_TO_CLIENTS).expect("create");
 
-        let client = unsafe {
-            ClientCnc::from_ptr(cnc.base_ptr(), cnc.length())
-        }.expect("client map");
+        let client =
+            unsafe { ClientCnc::from_ptr(cnc.base_ptr(), cnc.length()) }.expect("client map");
 
         assert_eq!(client.driver_pid(), std::process::id() as i32);
     }
 
     #[test]
     fn driver_heartbeat_alive() {
-        let cnc = DriverCnc::create_anonymous(TEST_TO_DRIVER, TEST_TO_CLIENTS)
-            .expect("create");
+        let cnc = DriverCnc::create_anonymous(TEST_TO_DRIVER, TEST_TO_CLIENTS).expect("create");
         cnc.update_heartbeat();
 
-        let client = unsafe {
-            ClientCnc::from_ptr(cnc.base_ptr(), cnc.length())
-        }.expect("client map");
+        let client =
+            unsafe { ClientCnc::from_ptr(cnc.base_ptr(), cnc.length()) }.expect("client map");
 
         assert!(client.is_driver_alive(5000));
     }
 
     #[test]
     fn command_roundtrip_via_cnc() {
-        let cnc = DriverCnc::create_anonymous(TEST_TO_DRIVER, TEST_TO_CLIENTS)
-            .expect("create");
+        let cnc = DriverCnc::create_anonymous(TEST_TO_DRIVER, TEST_TO_CLIENTS).expect("create");
 
-        let mut client = unsafe {
-            ClientCnc::from_ptr(cnc.base_ptr(), cnc.length())
-        }.expect("client map");
+        let mut client =
+            unsafe { ClientCnc::from_ptr(cnc.base_ptr(), cnc.length()) }.expect("client map");
 
         // Client writes a command.
         use crate::cnc::command::*;
@@ -573,7 +578,10 @@ mod tests {
             .expect("cmd");
         let mut buf = [0u8; ADD_PUBLICATION_LENGTH];
         cmd.encode(&mut buf).expect("encode");
-        client.to_driver().write(CMD_ADD_PUBLICATION, &buf).expect("write");
+        client
+            .to_driver()
+            .write(CMD_ADD_PUBLICATION, &buf)
+            .expect("write");
 
         // Driver reads the command.
         let mut received_type = 0i32;
@@ -597,7 +605,9 @@ mod tests {
         };
         let mut rsp_buf = [0u8; PUBLICATION_READY_LENGTH];
         rsp.encode(&mut rsp_buf).expect("encode rsp");
-        cnc.to_clients().transmit(RSP_PUBLICATION_READY, &rsp_buf).expect("transmit");
+        cnc.to_clients()
+            .transmit(RSP_PUBLICATION_READY, &rsp_buf)
+            .expect("transmit");
 
         // Client reads the response.
         let mut rsp_type = 0i32;
@@ -614,9 +624,8 @@ mod tests {
 
     #[test]
     fn cnc_file_length_correct() {
-        let expected = 256
-            + ring_buffer::required_buffer_size(1024)
-            + broadcast::required_buffer_size(1024);
+        let expected =
+            256 + ring_buffer::required_buffer_size(1024) + broadcast::required_buffer_size(1024);
         assert_eq!(cnc_file_length(1024, 1024), expected);
     }
 
@@ -636,19 +645,22 @@ mod tests {
         };
         assert_ne!(base, libc::MAP_FAILED);
 
-        let result = unsafe {
-            ClientCnc::from_ptr(base as *mut u8, length)
-        };
+        let result = unsafe { ClientCnc::from_ptr(base as *mut u8, length) };
         assert_eq!(result.unwrap_err(), CncError::NotReady);
 
-        unsafe { libc::munmap(base, length); }
+        unsafe {
+            libc::munmap(base, length);
+        }
     }
 
     #[test]
     fn display_errors() {
-        assert!(CncError::InvalidCapacity.to_string().contains("power-of-two"));
+        assert!(
+            CncError::InvalidCapacity
+                .to_string()
+                .contains("power-of-two")
+        );
         assert!(CncError::VersionMismatch.to_string().contains("mismatch"));
         assert!(CncError::NotReady.to_string().contains("not ready"));
     }
 }
-

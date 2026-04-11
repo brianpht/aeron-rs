@@ -85,7 +85,10 @@ mod tests {
         let t1 = clock.update();
         let c1 = clock.cached();
         let c2 = clock.cached();
-        assert_eq!(c1, c2, "cached() must return the same value between update() calls");
+        assert_eq!(
+            c1, c2,
+            "cached() must return the same value between update() calls"
+        );
         assert_eq!(c1, t1, "cached() must equal the last update() return");
     }
 
@@ -106,4 +109,3 @@ mod tests {
         assert!(t >= 0);
     }
 }
-

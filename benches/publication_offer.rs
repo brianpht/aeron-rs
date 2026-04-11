@@ -49,8 +49,7 @@ fn make_poller_and_transport() -> (UringTransportPoller, usize) {
 }
 
 fn make_publication() -> NetworkPublication {
-    NetworkPublication::new(42, 10, 0, BENCH_TERM_LENGTH, BENCH_MTU)
-        .expect("valid bench params")
+    NetworkPublication::new(42, 10, 0, BENCH_TERM_LENGTH, BENCH_MTU).expect("valid bench params")
 }
 
 // ──────────────────── Benchmarks ────────────────────
@@ -165,17 +164,19 @@ fn bench_publication_offer_empty(c: &mut Criterion) {
     c.bench_function("offer: NetworkPublication::offer (empty payload)", |b| {
         b.iter(|| {
             match pub_.offer(black_box(&[])) {
-                Ok(pos) => { black_box(pos); },
+                Ok(pos) => {
+                    black_box(pos);
+                }
                 Err(OfferError::AdminAction) => {
                     // Term rotated - retry immediately (expected periodically).
                     let _ = pub_.offer(&[]);
-                },
+                }
                 Err(OfferError::BackPressured) => {
                     // Drain sender_position so publisher can continue.
                     pub_.sender_scan(u32::MAX, |_, _| {});
                     let _ = pub_.offer(&[]);
-                },
-                Err(_) => {},
+                }
+                Err(_) => {}
             }
         });
     });
@@ -187,18 +188,18 @@ fn bench_publication_offer_64b(c: &mut Criterion) {
     let payload = [0xABu8; 64];
 
     c.bench_function("offer: NetworkPublication::offer (64B payload)", |b| {
-        b.iter(|| {
-            match pub_.offer(black_box(&payload)) {
-                Ok(pos) => { black_box(pos); },
-                Err(OfferError::AdminAction) => {
-                    let _ = pub_.offer(&payload);
-                },
-                Err(OfferError::BackPressured) => {
-                    pub_.sender_scan(u32::MAX, |_, _| {});
-                    let _ = pub_.offer(&payload);
-                },
-                Err(_) => {},
+        b.iter(|| match pub_.offer(black_box(&payload)) {
+            Ok(pos) => {
+                black_box(pos);
             }
+            Err(OfferError::AdminAction) => {
+                let _ = pub_.offer(&payload);
+            }
+            Err(OfferError::BackPressured) => {
+                pub_.sender_scan(u32::MAX, |_, _| {});
+                let _ = pub_.offer(&payload);
+            }
+            Err(_) => {}
         });
     });
 }
@@ -209,18 +210,18 @@ fn bench_publication_offer_1k(c: &mut Criterion) {
     let payload = [0xCDu8; 1024];
 
     c.bench_function("offer: NetworkPublication::offer (1KiB payload)", |b| {
-        b.iter(|| {
-            match pub_.offer(black_box(&payload)) {
-                Ok(pos) => { black_box(pos); },
-                Err(OfferError::AdminAction) => {
-                    let _ = pub_.offer(&payload);
-                },
-                Err(OfferError::BackPressured) => {
-                    pub_.sender_scan(u32::MAX, |_, _| {});
-                    let _ = pub_.offer(&payload);
-                },
-                Err(_) => {},
+        b.iter(|| match pub_.offer(black_box(&payload)) {
+            Ok(pos) => {
+                black_box(pos);
             }
+            Err(OfferError::AdminAction) => {
+                let _ = pub_.offer(&payload);
+            }
+            Err(OfferError::BackPressured) => {
+                pub_.sender_scan(u32::MAX, |_, _| {});
+                let _ = pub_.offer(&payload);
+            }
+            Err(_) => {}
         });
     });
 }
@@ -235,13 +236,15 @@ fn bench_sender_scan_single(c: &mut Criterion) {
         b.iter(|| {
             // Offer one frame then scan it.
             match pub_.offer(&[0u8; 64]) {
-                Ok(_) => {},
-                Err(OfferError::AdminAction) => { let _ = pub_.offer(&[0u8; 64]); },
+                Ok(_) => {}
+                Err(OfferError::AdminAction) => {
+                    let _ = pub_.offer(&[0u8; 64]);
+                }
                 Err(OfferError::BackPressured) => {
                     pub_.sender_scan(u32::MAX, |_, _| {});
                     let _ = pub_.offer(&[0u8; 64]);
-                },
-                Err(_) => {},
+                }
+                Err(_) => {}
             }
             let scanned = pub_.sender_scan(black_box(BENCH_MTU), |off, data| {
                 black_box(off);
@@ -262,13 +265,15 @@ fn bench_sender_scan_batch_16(c: &mut Criterion) {
             // Fill 16 frames.
             for _ in 0..16 {
                 match pub_.offer(&[0u8; 64]) {
-                    Ok(_) => {},
-                    Err(OfferError::AdminAction) => { let _ = pub_.offer(&[0u8; 64]); },
+                    Ok(_) => {}
+                    Err(OfferError::AdminAction) => {
+                        let _ = pub_.offer(&[0u8; 64]);
+                    }
                     Err(OfferError::BackPressured) => {
                         pub_.sender_scan(u32::MAX, |_, _| {});
                         let _ = pub_.offer(&[0u8; 64]);
-                    },
-                    Err(_) => {},
+                    }
+                    Err(_) => {}
                 }
             }
             // Scan all 16.
@@ -291,13 +296,17 @@ fn bench_offer_then_scan(c: &mut Criterion) {
         b.iter(|| {
             // Offer.
             match pub_.offer(black_box(&payload)) {
-                Ok(pos) => { black_box(pos); },
-                Err(OfferError::AdminAction) => { let _ = pub_.offer(&payload); },
+                Ok(pos) => {
+                    black_box(pos);
+                }
+                Err(OfferError::AdminAction) => {
+                    let _ = pub_.offer(&payload);
+                }
                 Err(OfferError::BackPressured) => {
                     pub_.sender_scan(u32::MAX, |_, _| {});
                     let _ = pub_.offer(&payload);
-                },
-                Err(_) => {},
+                }
+                Err(_) => {}
             }
             // Scan.
             let scanned = pub_.sender_scan(black_box(BENCH_MTU), |off, data| {
@@ -322,4 +331,3 @@ criterion_group!(
     bench_offer_then_scan,
 );
 criterion_main!(benches);
-

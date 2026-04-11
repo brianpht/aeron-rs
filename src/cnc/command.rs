@@ -589,4 +589,3 @@ mod tests {
         assert!(OperationError::decode(&[0u8; 4]).is_none());
     }
 }
-

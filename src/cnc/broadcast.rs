@@ -147,16 +147,12 @@ impl BroadcastTransmitter {
 
     #[inline]
     fn tail_counter_atomic(&self) -> &AtomicI64 {
-        unsafe {
-            &*(self.buffer.add(self.capacity + TAIL_COUNTER_OFFSET) as *const AtomicI64)
-        }
+        unsafe { &*(self.buffer.add(self.capacity + TAIL_COUNTER_OFFSET) as *const AtomicI64) }
     }
 
     #[inline]
     fn latest_counter_atomic(&self) -> &AtomicI64 {
-        unsafe {
-            &*(self.buffer.add(self.capacity + LATEST_COUNTER_OFFSET) as *const AtomicI64)
-        }
+        unsafe { &*(self.buffer.add(self.capacity + LATEST_COUNTER_OFFSET) as *const AtomicI64) }
     }
 
     /// Write a message into the broadcast buffer.
@@ -278,9 +274,7 @@ impl BroadcastReceiver {
 
     #[inline]
     fn tail_counter_atomic(&self) -> &AtomicI64 {
-        unsafe {
-            &*(self.buffer.add(self.capacity + TAIL_COUNTER_OFFSET) as *const AtomicI64)
-        }
+        unsafe { &*(self.buffer.add(self.capacity + TAIL_COUNTER_OFFSET) as *const AtomicI64) }
     }
 
     /// Read available messages, calling `handler(msg_type, payload)` for each.
@@ -387,9 +381,7 @@ mod tests {
     fn transmit_and_receive() {
         let (buf, tx) = new_heap_broadcast(TEST_CAPACITY).expect("create");
         let cursor = tx.tail_counter();
-        let mut rx = unsafe {
-            BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor)
-        };
+        let mut rx = unsafe { BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor) };
 
         let payload = [1u8, 2, 3, 4, 5, 6, 7, 8];
         tx.transmit(42, &payload).expect("transmit");
@@ -408,9 +400,7 @@ mod tests {
     fn transmit_multiple() {
         let (buf, tx) = new_heap_broadcast(TEST_CAPACITY).expect("create");
         let cursor = tx.tail_counter();
-        let mut rx = unsafe {
-            BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor)
-        };
+        let mut rx = unsafe { BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor) };
 
         for i in 0..10 {
             let payload = (i as u32).to_le_bytes();
@@ -423,8 +413,8 @@ mod tests {
         });
 
         assert_eq!(count, 10);
-        for i in 0..10 {
-            assert_eq!(received[i].0, i as i32 + 1);
+        for (i, item) in received.iter().enumerate().take(10) {
+            assert_eq!(item.0, i as i32 + 1);
         }
     }
 
@@ -432,9 +422,7 @@ mod tests {
     fn receive_empty() {
         let (buf, tx) = new_heap_broadcast(TEST_CAPACITY).expect("create");
         let cursor = tx.tail_counter();
-        let mut rx = unsafe {
-            BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor)
-        };
+        let mut rx = unsafe { BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor) };
 
         let count = rx.receive(|_, _| panic!("should not be called"));
         assert_eq!(count, 0);
@@ -445,12 +433,8 @@ mod tests {
         let (buf, tx) = new_heap_broadcast(TEST_CAPACITY).expect("create");
         let cursor = tx.tail_counter();
 
-        let mut rx1 = unsafe {
-            BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor)
-        };
-        let mut rx2 = unsafe {
-            BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor)
-        };
+        let mut rx1 = unsafe { BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor) };
+        let mut rx2 = unsafe { BroadcastReceiver::new(buf.as_ptr(), TEST_CAPACITY, cursor) };
 
         tx.transmit(1, &[10, 20]).expect("transmit");
 
@@ -471,7 +455,10 @@ mod tests {
     fn message_too_large() {
         let (_, tx) = new_heap_broadcast(64).expect("create");
         let payload = [0u8; 64];
-        assert_eq!(tx.transmit(1, &payload), Err(BroadcastError::MessageTooLarge));
+        assert_eq!(
+            tx.transmit(1, &payload),
+            Err(BroadcastError::MessageTooLarge)
+        );
     }
 
     #[test]
@@ -479,9 +466,7 @@ mod tests {
         // Small buffer - 64 bytes capacity. Can hold ~1-2 messages.
         let (buf, tx) = new_heap_broadcast(64).expect("create");
         let cursor = tx.tail_counter();
-        let mut rx = unsafe {
-            BroadcastReceiver::new(buf.as_ptr(), 64, cursor)
-        };
+        let mut rx = unsafe { BroadcastReceiver::new(buf.as_ptr(), 64, cursor) };
 
         // Write enough messages to lap the receiver.
         let payload = [0xAAu8; 20]; // 20 + 8 = 28, aligned to 32.
@@ -500,4 +485,3 @@ mod tests {
         assert!(e.to_string().contains("power-of-two"));
     }
 }
-

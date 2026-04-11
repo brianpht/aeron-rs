@@ -11,9 +11,9 @@ mod protocol_handshake {
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
+    use aeron_rs::agent::Agent;
     use aeron_rs::agent::receiver::ReceiverAgent;
     use aeron_rs::agent::sender::SenderAgent;
-    use aeron_rs::agent::Agent;
     use aeron_rs::context::DriverContext;
     use aeron_rs::media::channel::UdpChannel;
     use aeron_rs::media::receive_channel_endpoint::ReceiveChannelEndpoint;
@@ -56,13 +56,12 @@ mod protocol_handshake {
     /// NO warmup loop - each test controls its own duty cycle interleaving.
     fn setup_loopback_agents(ctx: &DriverContext) -> (SenderAgent, ReceiverAgent, usize) {
         // Receiver side: bind to ephemeral port.
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, ctx)
+            .expect("open recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -91,11 +90,7 @@ mod protocol_handshake {
     }
 
     /// Spin both agents interleaved until `duration` elapses.
-    fn spin_agents(
-        sender: &mut SenderAgent,
-        receiver: &mut ReceiverAgent,
-        duration: Duration,
-    ) {
+    fn spin_agents(sender: &mut SenderAgent, receiver: &mut ReceiverAgent, duration: Duration) {
         let deadline = Instant::now() + duration;
         while Instant::now() < deadline {
             let _ = sender.do_work();
@@ -119,17 +114,15 @@ mod protocol_handshake {
             Some(true),
             "publication should need setup before warmup"
         );
-        assert_eq!(
-            receiver.image_count(), 0,
-            "no images before warmup"
-        );
+        assert_eq!(receiver.image_count(), 0, "no images before warmup");
 
         // Spin agents for 200ms - allows Setup frames + SM reply cycle.
         spin_agents(&mut sender, &mut receiver, Duration::from_millis(200));
 
         // After warmup: receiver should have created an image.
         assert_eq!(
-            receiver.image_count(), 1,
+            receiver.image_count(),
+            1,
             "receiver should have 1 image after handshake"
         );
         assert!(
@@ -239,7 +232,8 @@ mod protocol_handshake {
 
         // Verify image exists after handshake.
         assert_eq!(
-            receiver.image_count(), 1,
+            receiver.image_count(),
+            1,
             "image should exist after handshake"
         );
         assert!(
@@ -253,7 +247,8 @@ mod protocol_handshake {
 
         // Image should still be alive (not timed out or removed).
         assert_eq!(
-            receiver.image_count(), 1,
+            receiver.image_count(),
+            1,
             "image should survive idle period with heartbeats"
         );
         assert!(
@@ -269,4 +264,3 @@ mod protocol_handshake {
         );
     }
 }
-

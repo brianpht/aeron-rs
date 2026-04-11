@@ -13,8 +13,8 @@ use crate::media::poller::{RecvMessage, TransportPoller};
 use crate::media::receive_channel_endpoint::{
     DataFrameHandler, PendingNak, PendingSm, ReceiveChannelEndpoint,
 };
-use crate::media::shared_image::{new_shared_image, ReceiverImage};
-use crate::media::term_buffer::{partition_index, PARTITION_COUNT};
+use crate::media::shared_image::{ReceiverImage, new_shared_image};
+use crate::media::term_buffer::{PARTITION_COUNT, partition_index};
 use crate::media::uring_poller::UringTransportPoller;
 
 // ── Pre-sized capacity for images ──
@@ -275,9 +275,7 @@ impl<'a> DataFrameHandler for InlineHandler<'a> {
         let stream_id = data_header.stream_id;
 
         // O(1) image lookup via hash index (replaces linear scan).
-        let image_idx = find_image_in_index(
-            self.images, self.image_index, session_id, stream_id,
-        );
+        let image_idx = find_image_in_index(self.images, self.image_index, session_id, stream_id);
 
         if let Some(idx) = image_idx {
             let img = &mut self.images[idx];
@@ -337,23 +335,19 @@ impl<'a> DataFrameHandler for InlineHandler<'a> {
 
                 // Write frame into image term buffer.
                 let pidx = partition_index(term_id, img.initial_term_id);
-                match recv_image.append_frame(
-                    pidx, term_offset as u32, data_header, payload,
-                ) {
+                match recv_image.append_frame(pidx, term_offset as u32, data_header, payload) {
                     Ok(new_offset) => {
                         let aligned_end = new_offset as i32;
                         // Only advance consumption within the current consumption term.
                         if term_id == img.consumption_term_id {
-                            let advance = aligned_end
-                                .wrapping_sub(img.consumption_term_offset);
+                            let advance = aligned_end.wrapping_sub(img.consumption_term_offset);
                             if advance > 0 && advance < (i32::MAX / 2) {
                                 img.consumption_term_offset = aligned_end;
                             }
                         }
                         // Track expected offset within the active term.
                         if term_id == img.active_term_id {
-                            let advance = aligned_end
-                                .wrapping_sub(img.expected_term_offset);
+                            let advance = aligned_end.wrapping_sub(img.expected_term_offset);
                             if advance > 0 && advance < (i32::MAX / 2) {
                                 img.expected_term_offset = aligned_end;
                             }
@@ -371,18 +365,13 @@ impl<'a> DataFrameHandler for InlineHandler<'a> {
         }
     }
 
-    fn on_setup(
-        &mut self,
-        setup: &SetupHeader,
-        source: &libc::sockaddr_storage,
-    ) {
+    fn on_setup(&mut self, setup: &SetupHeader, source: &libc::sockaddr_storage) {
         let session_id = setup.session_id;
         let stream_id = setup.stream_id;
 
         // O(1) existence check via hash index.
-        let exists = find_image_in_index(
-            self.images, self.image_index, session_id, stream_id,
-        ).is_some();
+        let exists =
+            find_image_in_index(self.images, self.image_index, session_id, stream_id).is_some();
 
         if !exists && *self.image_count < self.max_images {
             // Validate term_length from sender (must be power-of-two >= 32).
@@ -429,7 +418,8 @@ impl<'a> DataFrameHandler for InlineHandler<'a> {
                 term_length: tl as u32,
                 consumption_term_id: setup.active_term_id,
                 consumption_term_offset: setup.term_offset,
-                receiver_window: self.receiver_window_override
+                receiver_window: self
+                    .receiver_window_override
                     .unwrap_or(setup.term_length / 2),
                 receiver_id: 0,
                 expected_term_offset: setup.term_offset,
@@ -496,10 +486,7 @@ impl ReceiverAgent {
         })
     }
 
-    pub fn add_endpoint(
-        &mut self,
-        mut endpoint: ReceiveChannelEndpoint,
-    ) -> std::io::Result<usize> {
+    pub fn add_endpoint(&mut self, mut endpoint: ReceiveChannelEndpoint) -> std::io::Result<usize> {
         endpoint.register(&mut self.poller)?;
         let idx = self.endpoints.len();
         self.endpoints.push(endpoint);
@@ -513,9 +500,7 @@ impl ReceiverAgent {
 
     /// Check whether an image exists for the given (session_id, stream_id).
     pub fn has_image(&self, session_id: i32, stream_id: i32) -> bool {
-        find_image_in_index(
-            &self.images, &self.image_index, session_id, stream_id,
-        ).is_some()
+        find_image_in_index(&self.images, &self.image_index, session_id, stream_id).is_some()
     }
 
     /// Set the subscription bridge for delivering image handles to clients.
@@ -577,15 +562,11 @@ impl ReceiverAgent {
     ///
     /// Zero-allocation, O(1) amortized.
     pub fn remove_image(&mut self, session_id: i32, stream_id: i32) -> bool {
-        let found = find_image_in_index(
-            &self.images, &self.image_index, session_id, stream_id,
-        );
+        let found = find_image_in_index(&self.images, &self.image_index, session_id, stream_id);
         let Some(idx) = found else { return false };
 
         // Remove from hash index first.
-        remove_image_index(
-            &mut self.image_index, &self.images, session_id, stream_id,
-        );
+        remove_image_index(&mut self.image_index, &self.images, session_id, stream_id);
         self.images[idx].active = false;
 
         // Drop the removed image's shared buffer handle (signals close to subscriber).
@@ -602,7 +583,10 @@ impl ReceiverAgent {
 
             // Remove the moved entry from its old hash position.
             remove_image_index(
-                &mut self.image_index, &self.images, moved_session, moved_stream,
+                &mut self.image_index,
+                &self.images,
+                moved_session,
+                moved_stream,
             );
 
             // Swap into the hole.
@@ -610,9 +594,7 @@ impl ReceiverAgent {
             self.image_handles[idx] = self.image_handles[last].take();
 
             // Re-insert at the new images[] index.
-            insert_image_index(
-                &mut self.image_index, idx, moved_session, moved_stream,
-            );
+            insert_image_index(&mut self.image_index, idx, moved_session, moved_stream);
         }
 
         // Clear the vacated last slot.
@@ -717,7 +699,10 @@ impl ReceiverAgent {
         for i in 0..self.nak_queue_len {
             let nak = self.nak_queue[i];
             if let Some(idx) = find_image_in_index(
-                &self.images, &self.image_index, nak.session_id, nak.stream_id,
+                &self.images,
+                &self.image_index,
+                nak.session_id,
+                nak.stream_id,
             ) {
                 let ep_idx = self.images[idx].endpoint_idx;
                 if let Some(ep) = self.endpoints.get_mut(ep_idx) {
@@ -794,7 +779,10 @@ mod tests {
         for session in -100..100 {
             for stream in -10..10 {
                 let h = image_hash(session, stream);
-                assert!(h < MAX_IMAGES, "hash {h} out of range for ({session},{stream})");
+                assert!(
+                    h < MAX_IMAGES,
+                    "hash {h} out of range for ({session},{stream})"
+                );
             }
         }
     }
@@ -890,9 +878,11 @@ mod tests {
 
         // All others still findable.
         for i in 0..5 {
-            if i == 2 { continue; }
+            if i == 2 {
+                continue;
+            }
             assert!(
-                find_image_in_index(&images, &index, i as i32, 0).is_some(),
+                find_image_in_index(&images, &index, i, 0).is_some(),
                 "entry {i} should still be findable"
             );
         }
@@ -917,7 +907,10 @@ mod tests {
 
         // Table should be empty.
         for i in 0..n {
-            assert_eq!(find_image_in_index(&images, &index, i as i32, i as i32), None);
+            assert_eq!(
+                find_image_in_index(&images, &index, i as i32, i as i32),
+                None
+            );
         }
     }
 
@@ -954,11 +947,16 @@ mod tests {
                 insert_image_index(&mut index, idx, session, 0);
                 inserted.push(session);
             }
-            if inserted.len() >= 5 { break; }
+            if inserted.len() >= 5 {
+                break;
+            }
         }
 
         // Must have found at least 2 entries for a meaningful test.
-        assert!(inserted.len() >= 2, "need entries that hash near end of table");
+        assert!(
+            inserted.len() >= 2,
+            "need entries that hash near end of table"
+        );
 
         // Remove the first one inserted (at or near end of table).
         let target = inserted[0];
@@ -977,8 +975,8 @@ mod tests {
     // ── InlineHandler + image term buffer ──
 
     use crate::frame::{
-        DATA_HEADER_LENGTH, CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END,
-        FRAME_TYPE_DATA, FRAME_TYPE_SETUP, SETUP_TOTAL_LENGTH,
+        CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END, DATA_HEADER_LENGTH, FRAME_TYPE_DATA,
+        FRAME_TYPE_SETUP, SETUP_TOTAL_LENGTH,
     };
     use crate::media::term_buffer::PARTITION_COUNT;
 
@@ -1004,11 +1002,21 @@ mod tests {
             [unsafe { std::mem::zeroed() }; MAX_PENDING_NAKS_PER_CYCLE];
         let nak_queue_len = 0usize;
         let sub_bridge = Some(SubscriptionBridge::new() as Arc<SubscriptionBridge>);
-        (images, image_count, image_index, image_handles, nak_queue, nak_queue_len, sub_bridge)
+        (
+            images,
+            image_count,
+            image_index,
+            image_handles,
+            nak_queue,
+            nak_queue_len,
+            sub_bridge,
+        )
     }
 
     /// Take the first SubscriberImage from the bridge (deposited by on_setup).
-    fn take_subscriber_image(bridge: &Option<Arc<SubscriptionBridge>>) -> Option<crate::media::shared_image::SubscriberImage> {
+    fn take_subscriber_image(
+        bridge: &Option<Arc<SubscriptionBridge>>,
+    ) -> Option<crate::media::shared_image::SubscriberImage> {
         let b = bridge.as_ref()?;
         for i in 0..crate::client::sub_bridge::SUB_BRIDGE_CAPACITY {
             if let Some(pending) = b.try_take(i) {
@@ -1072,7 +1080,8 @@ mod tests {
 
     #[test]
     fn on_setup_creates_image_with_shared_buffer() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1108,7 +1117,8 @@ mod tests {
 
     #[test]
     fn on_setup_rejects_invalid_term_length() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1135,7 +1145,8 @@ mod tests {
 
     #[test]
     fn on_setup_rejects_too_small_term_length() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1161,7 +1172,8 @@ mod tests {
 
     #[test]
     fn on_setup_respects_max_images() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1188,7 +1200,8 @@ mod tests {
 
     #[test]
     fn on_data_writes_frame_into_image_buffer() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1218,18 +1231,22 @@ mod tests {
         // Verify data was written into the shared image buffer via subscriber poll.
         let mut sub_img = take_subscriber_image(&sub_bridge).unwrap();
         let mut found_payload = Vec::new();
-        let count_polled = sub_img.poll_fragments(|data, sid, stid| {
-            assert_eq!(sid, 42);
-            assert_eq!(stid, 7);
-            found_payload.extend_from_slice(data);
-        }, 10);
+        let count_polled = sub_img.poll_fragments(
+            |data, sid, stid| {
+                assert_eq!(sid, 42);
+                assert_eq!(stid, 7);
+                found_payload.extend_from_slice(data);
+            },
+            10,
+        );
         assert_eq!(count_polled, 1);
         assert_eq!(&found_payload, &[0xCA, 0xFE, 0xBA, 0xBE]);
     }
 
     #[test]
     fn on_data_advances_consumption_from_append() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1260,7 +1277,8 @@ mod tests {
 
     #[test]
     fn on_data_multiple_frames_sequential() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1298,7 +1316,8 @@ mod tests {
 
     #[test]
     fn on_data_term_rotation_cleans_entering_partition() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1340,7 +1359,8 @@ mod tests {
 
     #[test]
     fn on_data_stale_term_rejected() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1358,9 +1378,8 @@ mod tests {
                 receiver_window_override: None,
             };
             // Start at term 4, so terms 0-3 are all stale (>= PARTITION_COUNT behind).
-            let setup = make_setup_header(
-                42, 7, 0, PARTITION_COUNT as i32, TEST_TERM_LENGTH as i32, 0,
-            );
+            let setup =
+                make_setup_header(42, 7, 0, PARTITION_COUNT as i32, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
 
             // Data for term 0 is PARTITION_COUNT behind active (term 4) - stale.
@@ -1381,7 +1400,8 @@ mod tests {
 
     #[test]
     fn on_data_recent_past_term_accepted() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1413,7 +1433,8 @@ mod tests {
 
     #[test]
     fn on_data_multi_term_jump_cleans_all_entering() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1452,7 +1473,8 @@ mod tests {
 
     #[test]
     fn gap_produces_pending_nak() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1486,12 +1508,13 @@ mod tests {
         assert_eq!(nq[0].stream_id, 7);
         assert_eq!(nq[0].active_term_id, 0);
         assert_eq!(nq[0].term_offset, 32); // start of the gap
-        assert_eq!(nq[0].length, 32);      // gap size
+        assert_eq!(nq[0].length, 32); // gap size
     }
 
     #[test]
     fn no_nak_for_in_order_data() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1525,7 +1548,8 @@ mod tests {
 
     #[test]
     fn nak_coalescing_suppresses_within_delay() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1535,7 +1559,7 @@ mod tests {
                 image_handles: handles.as_mut_slice(),
                 sub_bridge: &sub_bridge,
                 max_images: MAX_IMAGES,
-                now_ns: 100_000_000,   // 100ms
+                now_ns: 100_000_000,      // 100ms
                 nak_delay_ns: 60_000_000, // 60ms coalescing
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
@@ -1582,7 +1606,8 @@ mod tests {
 
     #[test]
     fn nak_coalescing_allows_after_delay() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1637,7 +1662,8 @@ mod tests {
 
     #[test]
     fn nak_only_for_active_term() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1673,7 +1699,8 @@ mod tests {
 
     #[test]
     fn nak_queue_overflow_drops_silently() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
 
         // Pre-fill NAK queue to capacity.
@@ -1706,14 +1733,18 @@ mod tests {
         }
 
         // Queue length should not exceed capacity.
-        assert_eq!(nql, MAX_PENDING_NAKS_PER_CYCLE, "queue should not grow past capacity");
+        assert_eq!(
+            nql, MAX_PENDING_NAKS_PER_CYCLE,
+            "queue should not grow past capacity"
+        );
     }
 
     // ── Adaptive SM: sm_pending flag ──
 
     #[test]
     fn on_data_sets_sm_pending_when_enabled() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1754,12 +1785,16 @@ mod tests {
             let dh = make_data_header(42, 7, 0, 0, 0);
             handler.on_data(&dh, &[], &source);
         }
-        assert!(images[0].sm_pending, "sm_pending should be true after on_data with send_sm_on_data=true");
+        assert!(
+            images[0].sm_pending,
+            "sm_pending should be true after on_data with send_sm_on_data=true"
+        );
     }
 
     #[test]
     fn on_data_does_not_set_sm_pending_when_disabled() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1782,14 +1817,18 @@ mod tests {
             let dh = make_data_header(42, 7, 0, 0, 0);
             handler.on_data(&dh, &[], &source);
         }
-        assert!(!images[0].sm_pending, "sm_pending should stay false when send_sm_on_data=false");
+        assert!(
+            !images[0].sm_pending,
+            "sm_pending should stay false when send_sm_on_data=false"
+        );
     }
 
     // ── Consumption position tracking ──
 
     #[test]
     fn consumption_position_correct_after_three_sequential_frames() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1825,7 +1864,8 @@ mod tests {
 
     #[test]
     fn consumption_position_does_not_regress_on_duplicate() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1870,7 +1910,8 @@ mod tests {
 
     #[test]
     fn receiver_window_uses_override_when_set() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {
@@ -1898,7 +1939,8 @@ mod tests {
 
     #[test]
     fn receiver_window_uses_default_when_no_override() {
-        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
         let source = zeroed_source();
         {
             let mut handler = InlineHandler {

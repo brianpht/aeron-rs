@@ -721,7 +721,11 @@ mod tests {
             };
             let mut buf = [0u8; FRAME_HEADER_LENGTH];
             hdr.write(&mut buf);
-            assert_eq!(classify_frame(&buf), Some(expected), "frame_type=0x{wire_val:04X}");
+            assert_eq!(
+                classify_frame(&buf),
+                Some(expected),
+                "frame_type=0x{wire_val:04X}"
+            );
         }
     }
 
@@ -804,4 +808,3 @@ mod tests {
         assert!(s.contains("frame_length"));
     }
 }
-

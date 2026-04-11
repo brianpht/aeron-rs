@@ -16,18 +16,17 @@
 //
 // No Mutex. No SeqCst. Zero allocation in steady state.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::frame::{
-    DataHeader, FrameHeader, CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END,
-    DATA_HEADER_LENGTH, FRAME_TYPE_DATA, FRAME_TYPE_PAD,
+    CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END, DATA_HEADER_LENGTH, DataHeader,
+    FRAME_TYPE_DATA, FRAME_TYPE_PAD, FrameHeader,
 };
 use crate::media::network_publication::OfferError;
 use crate::media::term_buffer::{
-    SharedLogBuffer, PARTITION_COUNT,
-    align_frame_length, atomic_frame_length_load, atomic_frame_length_store,
-    partition_index,
+    PARTITION_COUNT, SharedLogBuffer, align_frame_length, atomic_frame_length_load,
+    atomic_frame_length_store, partition_index,
 };
 
 // ---- Shared inner state ----
@@ -268,7 +267,9 @@ impl ConcurrentPublication {
         // Step 4: Advance local cursor.
         self.term_offset = new_offset;
         self.pub_position_local = self.compute_position(self.active_term_id, new_offset);
-        self.inner.pub_position.store(self.pub_position_local, Ordering::Release);
+        self.inner
+            .pub_position
+            .store(self.pub_position_local, Ordering::Release);
 
         Ok(self.pub_position_local)
     }
@@ -365,11 +366,10 @@ impl SenderPublication {
     {
         let inner = &*self.inner;
 
-        let term_id = inner.initial_term_id.wrapping_add(
-            (self.sender_position_local >> inner.position_bits_to_shift) as i32,
-        );
-        let term_offset =
-            (self.sender_position_local & inner.term_length_mask as i64) as u32;
+        let term_id = inner
+            .initial_term_id
+            .wrapping_add((self.sender_position_local >> inner.position_bits_to_shift) as i32);
+        let term_offset = (self.sender_position_local & inner.term_length_mask as i64) as u32;
 
         let part_idx = partition_index(term_id, inner.initial_term_id);
 
@@ -421,10 +421,7 @@ impl SenderPublication {
             // SAFETY: Acquire load of frame_length guarantees all header + payload
             // bytes written by the publisher (before their Release store) are visible.
             let frame_slice = unsafe {
-                std::slice::from_raw_parts(
-                    buf_ptr.add(byte_offset),
-                    frame_len_u as usize,
-                )
+                std::slice::from_raw_parts(buf_ptr.add(byte_offset), frame_len_u as usize)
             };
 
             emit(pos, frame_slice);
@@ -487,9 +484,9 @@ impl SenderPublication {
     #[inline]
     pub fn active_term_id_approx(&self) -> i32 {
         let pub_pos = self.inner.pub_position.load(Ordering::Relaxed);
-        self.inner.initial_term_id.wrapping_add(
-            (pub_pos >> self.inner.position_bits_to_shift) as i32,
-        )
+        self.inner
+            .initial_term_id
+            .wrapping_add((pub_pos >> self.inner.position_bits_to_shift) as i32)
     }
 
     /// Current term offset (read from atomic pub_position to derive).
@@ -507,13 +504,7 @@ impl SenderPublication {
     /// in the SharedLogBuffer (same protocol as sender_scan).
     ///
     /// Returns total bytes of frames emitted.
-    pub fn scan_term_at<F>(
-        &self,
-        partition_idx: usize,
-        offset: u32,
-        limit: u32,
-        mut emit: F,
-    ) -> u32
+    pub fn scan_term_at<F>(&self, partition_idx: usize, offset: u32, limit: u32, mut emit: F) -> u32
     where
         F: FnMut(u32, &[u8]),
     {
@@ -563,10 +554,7 @@ impl SenderPublication {
             // SAFETY: Acquire load of frame_length guarantees all header + payload
             // bytes written by the publisher (before their Release store) are visible.
             let frame_slice = unsafe {
-                std::slice::from_raw_parts(
-                    buf_ptr.add(byte_offset),
-                    frame_len_u as usize,
-                )
+                std::slice::from_raw_parts(buf_ptr.add(byte_offset), frame_len_u as usize)
             };
 
             emit(pos, frame_slice);
@@ -604,8 +592,7 @@ mod tests {
     const TEST_MTU: u32 = 1408;
 
     fn make_pair() -> (ConcurrentPublication, SenderPublication) {
-        new_concurrent(42, 7, 0, TEST_TERM_LENGTH, TEST_MTU)
-            .expect("valid params")
+        new_concurrent(42, 7, 0, TEST_TERM_LENGTH, TEST_MTU).expect("valid params")
     }
 
     fn make_pair_with(
@@ -930,8 +917,8 @@ mod tests {
         // Fill until back-pressured.
         loop {
             match pub_h.offer(&[]) {
-                Ok(_) => {},
-                Err(OfferError::AdminAction) => {},
+                Ok(_) => {}
+                Err(OfferError::AdminAction) => {}
                 Err(OfferError::BackPressured) => break,
                 Err(e) => panic!("unexpected error: {e}"),
             }
@@ -941,7 +928,9 @@ mod tests {
         let mut total_scanned = 0u32;
         loop {
             let s = send_h.sender_scan(u32::MAX, |_, _| {});
-            if s == 0 { break; }
+            if s == 0 {
+                break;
+            }
             total_scanned += s;
         }
         assert!(total_scanned > 0);
@@ -950,12 +939,18 @@ mod tests {
         let mut success = false;
         for _ in 0..4 {
             match pub_h.offer(&[]) {
-                Ok(_) => { success = true; break; },
-                Err(OfferError::AdminAction) => {},
+                Ok(_) => {
+                    success = true;
+                    break;
+                }
+                Err(OfferError::AdminAction) => {}
                 Err(e) => panic!("unexpected error after scan: {e}"),
             }
         }
-        assert!(success, "should be able to offer after scanning frees space");
+        assert!(
+            success,
+            "should be able to offer after scanning frees space"
+        );
     }
 
     // ---- Accessor coverage ----
@@ -1045,4 +1040,3 @@ mod tests {
         assert_eq!(send_h.pub_position(), FRAME_ALIGNMENT as i64);
     }
 }
-

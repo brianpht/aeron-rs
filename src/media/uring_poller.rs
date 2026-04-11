@@ -6,8 +6,8 @@
 // stays active across completions; the kernel picks buffers from the shared
 // ring. Eliminates the SQE re-arm + submit overhead per received packet.
 
-use io_uring::{cqueue, opcode, types, IoUring};
 use io_uring::types::{BufRingEntry, RecvMsgOut};
+use io_uring::{IoUring, cqueue, opcode, types};
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::io;
 use std::mem::{self, MaybeUninit};
@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicU16, Ordering};
 
 use libc;
 
-use crate::context::DriverContext;
-use super::buffer_pool::{SlotPool, SlotState, MAX_RECV_BUFFER};
+use super::buffer_pool::{MAX_RECV_BUFFER, SlotPool, SlotState};
 use super::poller::{PollError, PollResult, RecvMessage, TransportPoller};
 use super::transport::UdpChannelTransport;
+use crate::context::DriverContext;
 
 // ──────────────────────────── Constants ────────────────────────────
 
@@ -70,11 +70,7 @@ impl BufRingPool {
     ///
     /// `entries` must be power-of-two <= 32768.
     /// Allocates `entries` buffers of `buf_size` bytes each.
-    fn new(
-        submitter: &io_uring::Submitter<'_>,
-        entries: u16,
-        buf_size: u32,
-    ) -> io::Result<Self> {
+    fn new(submitter: &io_uring::Submitter<'_>, entries: u16, buf_size: u32) -> io::Result<Self> {
         debug_assert!(
             entries.is_power_of_two(),
             "buf_ring entries must be power-of-two"
@@ -106,8 +102,7 @@ impl BufRingPool {
 
         // ── Initialize each ring entry → points to its buffer ──
         for i in 0..entries as usize {
-            let entry =
-                unsafe { &mut *(ring_ptr.add(i * entry_size) as *mut BufRingEntry) };
+            let entry = unsafe { &mut *(ring_ptr.add(i * entry_size) as *mut BufRingEntry) };
             let buf_addr = unsafe { bufs_ptr.add(i * buf_size as usize) };
             entry.set_addr(buf_addr as u64);
             entry.set_len(buf_size);
@@ -115,8 +110,7 @@ impl BufRingPool {
         }
 
         // ── Set initial tail = entries (all buffers available) ──
-        let tail_ptr =
-            unsafe { BufRingEntry::tail(ring_ptr as *const BufRingEntry) as *mut u16 };
+        let tail_ptr = unsafe { BufRingEntry::tail(ring_ptr as *const BufRingEntry) as *mut u16 };
         unsafe {
             AtomicU16::from_ptr(tail_ptr).store(entries, Ordering::Release);
         }
@@ -125,10 +119,9 @@ impl BufRingPool {
         unsafe {
             submitter
                 .register_buf_ring_with_flags(ring_ptr as u64, entries, BUF_GROUP_ID, 0)
-                .map_err(|e| {
+                .inspect_err(|_| {
                     dealloc(bufs_ptr, bufs_layout);
                     dealloc(ring_ptr, ring_layout);
-                    e
                 })?;
         }
 
@@ -174,11 +167,9 @@ impl BufRingPool {
 
         let entry_size = mem::size_of::<BufRingEntry>();
         let idx = (self.local_tail & self.mask) as usize;
-        let entry =
-            unsafe { &mut *(self.ring_ptr.add(idx * entry_size) as *mut BufRingEntry) };
+        let entry = unsafe { &mut *(self.ring_ptr.add(idx * entry_size) as *mut BufRingEntry) };
 
-        let buf_addr =
-            unsafe { self.bufs_ptr.add(bid as usize * self.buf_size as usize) };
+        let buf_addr = unsafe { self.bufs_ptr.add(bid as usize * self.buf_size as usize) };
         entry.set_addr(buf_addr as u64);
         entry.set_len(self.buf_size);
         entry.set_bid(bid);
@@ -277,9 +268,8 @@ pub struct UringTransportPoller {
 
 impl UringTransportPoller {
     pub fn new(ctx: &DriverContext) -> io::Result<Self> {
-        ctx.validate().map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
-        })?;
+        ctx.validate()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
         let mut builder = IoUring::builder();
         if ctx.uring_sqpoll {
@@ -300,8 +290,7 @@ impl UringTransportPoller {
         // Template msghdr for multishot RecvMsg - kernel reads msg_namelen
         // and msg_controllen to know how much name/control to capture.
         let mut recv_msghdr: libc::msghdr = unsafe { mem::zeroed() };
-        recv_msghdr.msg_namelen =
-            mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        recv_msghdr.msg_namelen = mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
         // msg_controllen = 0: no ancillary data needed for Aeron.
 
         let max_transports = 64usize;
@@ -505,17 +494,16 @@ impl TransportPoller for UringTransportPoller {
 
         let mut needs_submit = false;
 
-        for i in 0..cqe_count {
+        for item in cqe_buf.iter().take(cqe_count) {
             // SAFETY: we wrote cqe_buf[0..cqe_count] in the drain loop above.
-            let (ud_raw, ret, cqe_flags) = unsafe { cqe_buf[i].assume_init() };
+            let (ud_raw, ret, cqe_flags) = unsafe { item.assume_init() };
             let ud = UserData(ud_raw);
             let tidx = ud.transport_idx() as usize;
             let op = ud.op();
 
             match op {
                 UserData::OP_RECV => {
-                    let active =
-                        tidx < self.transports.len() && self.transports[tidx].active;
+                    let active = tidx < self.transports.len() && self.transports[tidx].active;
                     let has_more = cqueue::more(cqe_flags);
 
                     if let Some(buf_id) = cqueue::buffer_select(cqe_flags) {
@@ -523,8 +511,7 @@ impl TransportPoller for UringTransportPoller {
                             // Scope: immutable borrow of buf_ring for buffer
                             // access + callback. Released before return_buf_local.
                             let bytes = {
-                                let buf =
-                                    self.buf_ring.buf_data(buf_id, ret as usize);
+                                let buf = self.buf_ring.buf_data(buf_id, ret as usize);
                                 match RecvMsgOut::parse(buf, &self.recv_msghdr) {
                                     Ok(recv_out) => {
                                         // Copy source addr to stack (avoids
@@ -533,15 +520,14 @@ impl TransportPoller for UringTransportPoller {
                                         let mut source_addr: libc::sockaddr_storage =
                                             unsafe { mem::zeroed() };
                                         let name = recv_out.name_data();
-                                        let copy_len = name.len().min(
-                                            mem::size_of::<libc::sockaddr_storage>(),
-                                        );
+                                        let copy_len = name
+                                            .len()
+                                            .min(mem::size_of::<libc::sockaddr_storage>());
                                         if copy_len > 0 {
                                             unsafe {
                                                 std::ptr::copy_nonoverlapping(
                                                     name.as_ptr(),
-                                                    &mut source_addr as *mut _
-                                                        as *mut u8,
+                                                    &mut source_addr as *mut _ as *mut u8,
                                                     copy_len,
                                                 );
                                             }
@@ -554,12 +540,10 @@ impl TransportPoller for UringTransportPoller {
                                         let msg = RecvMessage {
                                             transport_idx: tidx,
                                             dispatch_clientd: te.dispatch_clientd,
-                                            destination_clientd: te
-                                                .destination_clientd,
+                                            destination_clientd: te.destination_clientd,
                                             data: payload,
                                             source_addr: &source_addr,
-                                            source_addr_len: recv_out
-                                                .incoming_name_len()
+                                            source_addr_len: recv_out.incoming_name_len()
                                                 as libc::socklen_t,
                                         };
                                         callback(msg);
@@ -576,10 +560,7 @@ impl TransportPoller for UringTransportPoller {
                             }
                         } else if ret < 0 {
                             let err = -ret;
-                            if err != libc::EAGAIN
-                                && err != libc::EINTR
-                                && err != libc::ECANCELED
-                            {
+                            if err != libc::EAGAIN && err != libc::EINTR && err != libc::ECANCELED {
                                 result.recv_errors += 1;
                             }
                         }
@@ -591,10 +572,7 @@ impl TransportPoller for UringTransportPoller {
                         // Error CQE without a buffer (e.g., multishot
                         // terminated with -ENOBUFS or -ECANCELED).
                         let err = -ret;
-                        if err != libc::EAGAIN
-                            && err != libc::EINTR
-                            && err != libc::ECANCELED
-                        {
+                        if err != libc::EAGAIN && err != libc::EINTR && err != libc::ECANCELED {
                             result.recv_errors += 1;
                         }
                     }
@@ -659,10 +637,7 @@ impl TransportPoller for UringTransportPoller {
         data: &[u8],
         dest: Option<&libc::sockaddr_storage>,
     ) -> Result<(), PollError> {
-        let slot_idx = self
-            .pool
-            .alloc_send()
-            .ok_or(PollError::NoSendSlot)?;
+        let slot_idx = self.pool.alloc_send().ok_or(PollError::NoSendSlot)?;
 
         self.submit_send_sqe(transport_idx as u16, slot_idx, data, dest)
     }
@@ -672,4 +647,3 @@ impl TransportPoller for UringTransportPoller {
         Ok(())
     }
 }
-

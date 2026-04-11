@@ -13,9 +13,9 @@ mod flow_control_e2e {
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
+    use aeron_rs::agent::Agent;
     use aeron_rs::agent::receiver::ReceiverAgent;
     use aeron_rs::agent::sender::SenderAgent;
-    use aeron_rs::agent::Agent;
     use aeron_rs::context::DriverContext;
     use aeron_rs::frame::DATA_HEADER_LENGTH;
     use aeron_rs::media::channel::UdpChannel;
@@ -54,13 +54,12 @@ mod flow_control_e2e {
     #[test]
     fn sender_limit_stays_at_initial_without_receiver() {
         let ctx = make_flow_ctx();
-        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse channel");
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse channel");
         let local: SocketAddr = "0.0.0.0:0".parse().expect("parse local addr");
         let remote = channel.remote_data;
 
-        let transport = UdpChannelTransport::open(&channel, &local, &remote, &ctx)
-            .expect("transport open");
+        let transport =
+            UdpChannelTransport::open(&channel, &local, &remote, &ctx).expect("transport open");
 
         let endpoint = SendChannelEndpoint::new(channel, transport);
         let mut sender = SenderAgent::new(&ctx).expect("sender agent");
@@ -69,7 +68,8 @@ mod flow_control_e2e {
             .add_publication(0, SESSION_ID, STREAM_ID, INITIAL_TERM_ID, TERM_LENGTH, MTU)
             .expect("add pub");
 
-        let initial_limit = sender.publication_sender_limit(pub_idx)
+        let initial_limit = sender
+            .publication_sender_limit(pub_idx)
             .expect("sender_limit available");
         assert_eq!(
             initial_limit, TERM_LENGTH as i64,
@@ -84,7 +84,8 @@ mod flow_control_e2e {
             let _ = sender.do_work();
         }
 
-        let limit_after = sender.publication_sender_limit(pub_idx)
+        let limit_after = sender
+            .publication_sender_limit(pub_idx)
             .expect("sender_limit available");
         assert_eq!(
             limit_after, initial_limit,
@@ -98,13 +99,12 @@ mod flow_control_e2e {
     fn sender_limit_advances_after_sm() {
         let ctx = make_flow_ctx();
 
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+            .expect("open recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -129,7 +129,8 @@ mod flow_control_e2e {
             .expect("add pub");
 
         // Initial limit = term_length.
-        let initial_limit = sender.publication_sender_limit(pub_idx)
+        let initial_limit = sender
+            .publication_sender_limit(pub_idx)
             .expect("sender_limit available");
         assert_eq!(initial_limit, TERM_LENGTH as i64);
 
@@ -171,13 +172,12 @@ mod flow_control_e2e {
     fn sender_limit_never_regresses() {
         let ctx = make_flow_ctx();
 
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+            .expect("open recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -255,12 +255,11 @@ mod flow_control_e2e {
             term_buffer_length: 64, // tiny term
             ..make_flow_ctx()
         };
-        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse channel");
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse channel");
         let local: SocketAddr = "0.0.0.0:0".parse().expect("parse local addr");
         let remote = channel.remote_data;
-        let transport = UdpChannelTransport::open(&channel, &local, &remote, &ctx)
-            .expect("transport open");
+        let transport =
+            UdpChannelTransport::open(&channel, &local, &remote, &ctx).expect("transport open");
 
         let endpoint = SendChannelEndpoint::new(channel, transport);
         let mut sender = SenderAgent::new(&ctx).expect("sender agent");
@@ -283,7 +282,10 @@ mod flow_control_e2e {
                 }
             }
         }
-        assert!(got_bp, "should get BackPressured with tiny term and no receiver");
+        assert!(
+            got_bp,
+            "should get BackPressured with tiny term and no receiver"
+        );
     }
 
     /// Under the standard bench configuration (term_length=256KiB,
@@ -309,13 +311,12 @@ mod flow_control_e2e {
             ..DriverContext::default()
         };
 
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+            .expect("open recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -389,4 +390,3 @@ mod flow_control_e2e {
         );
     }
 }
-

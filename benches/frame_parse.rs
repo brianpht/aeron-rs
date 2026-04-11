@@ -158,4 +158,3 @@ criterion_group!(
     bench_setup_parse,
 );
 criterion_main!(benches);
-

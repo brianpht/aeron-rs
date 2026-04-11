@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::client::sub_bridge::{SubscriptionBridge, SUB_BRIDGE_CAPACITY};
+use crate::client::sub_bridge::{SUB_BRIDGE_CAPACITY, SubscriptionBridge};
 use crate::media::shared_image::SubscriberImage;
 
 /// Maximum images tracked per subscription. Pre-sized flat array, no allocation.
@@ -119,13 +119,12 @@ impl Subscription {
             }
             // Peek first - only take items matching our stream_id.
             // Non-matching items are left for other subscriptions.
-            if let Some(stream) = self.sub_bridge.peek_stream_id(idx) {
-                if stream == self.stream_id {
-                    if let Some(pending) = self.sub_bridge.try_take(idx) {
-                        self.images[self.image_count] = Some(pending.image);
-                        self.image_count += 1;
-                    }
-                }
+            if let Some(stream) = self.sub_bridge.peek_stream_id(idx)
+                && stream == self.stream_id
+                && let Some(pending) = self.sub_bridge.try_take(idx)
+            {
+                self.images[self.image_count] = Some(pending.image);
+                self.image_count += 1;
             }
         }
     }
@@ -134,9 +133,7 @@ impl Subscription {
     fn remove_closed_images(&mut self) {
         let mut i = 0;
         while i < self.image_count {
-            let closed = self.images[i]
-                .as_ref()
-                .map_or(false, |img| img.is_closed());
+            let closed = self.images[i].as_ref().is_some_and(|img| img.is_closed());
             if closed {
                 // Swap-remove with last active.
                 let last = self.image_count - 1;
@@ -174,9 +171,7 @@ impl Subscription {
     /// Channel URI string.
     pub fn channel(&self) -> &str {
         // SAFETY: channel_uri_buf[..len] was copied from a valid &str.
-        unsafe {
-            std::str::from_utf8_unchecked(&self.channel_uri_buf[..self.channel_uri_len])
-        }
+        unsafe { std::str::from_utf8_unchecked(&self.channel_uri_buf[..self.channel_uri_len]) }
     }
 }
 

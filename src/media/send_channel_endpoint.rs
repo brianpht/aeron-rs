@@ -1,9 +1,9 @@
 use libc;
 
-use crate::frame::*;
 use super::channel::UdpChannel;
 use super::poller::{PollError, TransportPoller};
 use super::transport::UdpChannelTransport;
+use crate::frame::*;
 
 // ── Pre-sized ring buffer capacity for hot-path message storage ──
 const MAX_RECENT_SM: usize = 64;
@@ -116,26 +116,18 @@ impl SendChannelEndpoint {
             FrameType::StatusMessage => {
                 if let Some(sm) = StatusMessage::parse(data) {
                     if self.recent_sm_len < MAX_RECENT_SM {
-                        self.recent_sm[self.recent_sm_len] = StatusMessageInfo {
-                            sm: *sm,
-                        };
+                        self.recent_sm[self.recent_sm_len] = StatusMessageInfo { sm: *sm };
                         self.recent_sm_len += 1;
                     }
                     let sid = sm.session_id;
                     let stid = sm.stream_id;
-                    tracing::trace!(
-                        session_id = sid,
-                        stream_id = stid,
-                        "recv SM"
-                    );
+                    tracing::trace!(session_id = sid, stream_id = stid, "recv SM");
                 }
             }
             FrameType::Nak => {
                 if let Some(nak) = NakHeader::parse(data) {
                     if self.recent_naks_len < MAX_RECENT_NAK {
-                        self.recent_naks[self.recent_naks_len] = NakInfo {
-                            nak: *nak,
-                        };
+                        self.recent_naks[self.recent_naks_len] = NakInfo { nak: *nak };
                         self.recent_naks_len += 1;
                     }
                     let sid = nak.session_id;
@@ -157,18 +149,12 @@ impl SendChannelEndpoint {
                     // Only store replies (RTTM_FLAG_REPLY set), ignore requests.
                     if (flags & RTTM_FLAG_REPLY) != 0 {
                         if self.recent_rttms_len < MAX_RECENT_RTTM {
-                            self.recent_rttms[self.recent_rttms_len] = RttmInfo {
-                                rttm: *rttm,
-                            };
+                            self.recent_rttms[self.recent_rttms_len] = RttmInfo { rttm: *rttm };
                             self.recent_rttms_len += 1;
                         }
                         let sid = rttm.session_id;
                         let stid = rttm.stream_id;
-                        tracing::trace!(
-                            session_id = sid,
-                            stream_id = stid,
-                            "recv RTTM reply"
-                        );
+                        tracing::trace!(session_id = sid, stream_id = stid, "recv RTTM reply");
                     }
                 }
             }
@@ -207,9 +193,7 @@ impl SendChannelEndpoint {
         data: &[u8],
         dest: Option<&libc::sockaddr_storage>,
     ) -> Result<(), PollError> {
-        let idx = self
-            .transport_idx
-            .ok_or(PollError::NotRegistered)?;
+        let idx = self.transport_idx.ok_or(PollError::NotRegistered)?;
         poller.submit_send(idx, data, dest)
     }
 
@@ -245,9 +229,7 @@ impl SendChannelEndpoint {
             );
         }
 
-        let idx = self
-            .transport_idx
-            .ok_or(PollError::NotRegistered)?;
+        let idx = self.transport_idx.ok_or(PollError::NotRegistered)?;
         poller.submit_send(idx, &self.heartbeat_buf, dest)
     }
 
@@ -285,9 +267,7 @@ impl SendChannelEndpoint {
 
         setup.write(&mut self.setup_buf);
 
-        let idx = self
-            .transport_idx
-            .ok_or(PollError::NotRegistered)?;
+        let idx = self.transport_idx.ok_or(PollError::NotRegistered)?;
         poller.submit_send(idx, &self.setup_buf, dest)
     }
 
@@ -316,9 +296,7 @@ impl SendChannelEndpoint {
 
         rttm.write(&mut self.rttm_buf);
 
-        let idx = self
-            .transport_idx
-            .ok_or(PollError::NotRegistered)?;
+        let idx = self.transport_idx.ok_or(PollError::NotRegistered)?;
         poller.submit_send(idx, &self.rttm_buf, dest)
     }
 }
@@ -472,7 +450,11 @@ mod tests {
 
     // ── RTTM tests ──
 
-    fn build_rttm_reply_bytes(session_id: i32, stream_id: i32, echo_ts: i64) -> [u8; RTTM_TOTAL_LENGTH] {
+    fn build_rttm_reply_bytes(
+        session_id: i32,
+        stream_id: i32,
+        echo_ts: i64,
+    ) -> [u8; RTTM_TOTAL_LENGTH] {
         let rttm = RttmHeader {
             frame_header: FrameHeader {
                 frame_length: RTTM_TOTAL_LENGTH as i32,
@@ -491,7 +473,11 @@ mod tests {
         buf
     }
 
-    fn build_rttm_request_bytes(session_id: i32, stream_id: i32, echo_ts: i64) -> [u8; RTTM_TOTAL_LENGTH] {
+    fn build_rttm_request_bytes(
+        session_id: i32,
+        stream_id: i32,
+        echo_ts: i64,
+    ) -> [u8; RTTM_TOTAL_LENGTH] {
         let rttm = RttmHeader {
             frame_header: FrameHeader {
                 frame_length: RTTM_TOTAL_LENGTH as i32,
@@ -527,7 +513,10 @@ mod tests {
         let source: libc::sockaddr_storage = unsafe { mem::zeroed() };
         let buf = build_rttm_request_bytes(42, 7, 999);
         ep.on_message(&buf, &source);
-        assert_eq!(ep.recent_rttms_len, 0, "request should be ignored by sender endpoint");
+        assert_eq!(
+            ep.recent_rttms_len, 0,
+            "request should be ignored by sender endpoint"
+        );
     }
 
     #[test]

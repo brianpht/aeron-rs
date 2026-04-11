@@ -3,8 +3,8 @@ use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::os::unix::io::{AsRawFd, RawFd};
 
-use crate::context::DriverContext;
 use super::channel::UdpChannel;
+use crate::context::DriverContext;
 
 /// A UDP channel transport encapsulating one or two sockets
 /// (one send, optionally a separate recv for multicast).
@@ -55,8 +55,8 @@ impl UdpChannelTransport {
             SocketAddr::V6(_) => Domain::IPV6,
         };
 
-        let send_socket =
-            Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).map_err(TransportError::Socket)?;
+        let send_socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+            .map_err(TransportError::Socket)?;
 
         send_socket
             .set_nonblocking(true)
@@ -136,8 +136,8 @@ impl UdpChannelTransport {
         ctx: &DriverContext,
         domain: Domain,
     ) -> Result<(Socket, SocketAddr), TransportError> {
-        let recv_socket =
-            Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).map_err(TransportError::Socket)?;
+        let recv_socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+            .map_err(TransportError::Socket)?;
 
         recv_socket
             .set_reuse_address(true)
@@ -154,7 +154,9 @@ impl UdpChannelTransport {
 
         // Bind recv socket to the multicast port on INADDR_ANY.
         let bind_addr: SocketAddr = match remote_addr {
-            SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, v4.port())),
+            SocketAddr::V4(v4) => {
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, v4.port()))
+            }
             SocketAddr::V6(v6) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), v6.port()),
         };
         recv_socket

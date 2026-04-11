@@ -19,13 +19,12 @@ mod loss_recovery_e2e {
     use std::net::{SocketAddr, UdpSocket};
     use std::time::{Duration, Instant};
 
+    use aeron_rs::agent::Agent;
     use aeron_rs::agent::receiver::ReceiverAgent;
     use aeron_rs::agent::sender::SenderAgent;
-    use aeron_rs::agent::Agent;
     use aeron_rs::context::DriverContext;
     use aeron_rs::frame::{
-        CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END, DATA_HEADER_LENGTH,
-        FRAME_TYPE_DATA,
+        CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END, DATA_HEADER_LENGTH, FRAME_TYPE_DATA,
     };
     use aeron_rs::media::channel::UdpChannel;
     use aeron_rs::media::network_publication::OfferError;
@@ -79,13 +78,12 @@ mod loss_recovery_e2e {
     fn setup_harness() -> TestHarness {
         let ctx = make_ctx();
 
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-                .expect("recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+            .expect("recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -114,7 +112,12 @@ mod loss_recovery_e2e {
             let _ = receiver.do_work();
         }
 
-        TestHarness { sender, receiver, pub_idx, recv_port }
+        TestHarness {
+            sender,
+            receiver,
+            pub_idx,
+            recv_port,
+        }
     }
 
     /// Offer one frame, handle AdminAction retry. Returns true if offer succeeded.
@@ -172,17 +175,17 @@ mod loss_recovery_e2e {
         let mut buf = Vec::with_capacity(frame_length as usize);
 
         // FrameHeader (8 bytes)
-        buf.extend_from_slice(&frame_length.to_le_bytes());        // frame_length
-        buf.push(CURRENT_VERSION);                                  // version
-        buf.push(DATA_FLAG_BEGIN | DATA_FLAG_END);                  // flags
-        buf.extend_from_slice(&FRAME_TYPE_DATA.to_le_bytes());     // frame_type
+        buf.extend_from_slice(&frame_length.to_le_bytes()); // frame_length
+        buf.push(CURRENT_VERSION); // version
+        buf.push(DATA_FLAG_BEGIN | DATA_FLAG_END); // flags
+        buf.extend_from_slice(&FRAME_TYPE_DATA.to_le_bytes()); // frame_type
 
         // DataHeader remaining fields (24 bytes)
-        buf.extend_from_slice(&term_offset.to_le_bytes());         // term_offset
-        buf.extend_from_slice(&session_id.to_le_bytes());          // session_id
-        buf.extend_from_slice(&stream_id.to_le_bytes());           // stream_id
-        buf.extend_from_slice(&term_id.to_le_bytes());             // term_id
-        buf.extend_from_slice(&0i64.to_le_bytes());                // reserved_value
+        buf.extend_from_slice(&term_offset.to_le_bytes()); // term_offset
+        buf.extend_from_slice(&session_id.to_le_bytes()); // session_id
+        buf.extend_from_slice(&stream_id.to_le_bytes()); // stream_id
+        buf.extend_from_slice(&term_id.to_le_bytes()); // term_id
+        buf.extend_from_slice(&0i64.to_le_bytes()); // reserved_value
 
         // Payload
         buf.extend_from_slice(payload);
@@ -225,9 +228,7 @@ mod loss_recovery_e2e {
         }
 
         // Record sender_limit before gap injection.
-        let limit_before_gap = h.sender
-            .publication_sender_limit(h.pub_idx)
-            .unwrap_or(0);
+        let limit_before_gap = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
 
         // Phase 2: Offer frame 6 (offset 384) on sender but do NOT send it yet.
         // This ensures the frame exists in the sender's term buffer for retransmit.
@@ -239,7 +240,9 @@ mod loss_recovery_e2e {
         // Phase 3: Inject a raw frame at offset 448 (skipping offset 384).
         // Receiver sees expected=384, got=448 -> gap of 64 bytes -> NAK generated.
         let injected = build_raw_data_frame(
-            SESSION_ID, STREAM_ID, INITIAL_TERM_ID,
+            SESSION_ID,
+            STREAM_ID,
+            INITIAL_TERM_ID,
             448, // skip offset 384
             &[0xBBu8; 4],
         );
@@ -258,28 +261,21 @@ mod loss_recovery_e2e {
             let _ = h.receiver.do_work();
             let _ = h.sender.do_work();
 
-            let current = h.sender
-                .publication_sender_limit(h.pub_idx)
-                .unwrap_or(0);
+            let current = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
             let diff = current.wrapping_sub(limit_before_gap);
             if diff > 0 && diff < (i64::MAX >> 1) {
                 advanced = true;
                 break;
             }
         }
-        assert!(
-            advanced,
-            "sender_limit should advance after gap recovery"
-        );
+        assert!(advanced, "sender_limit should advance after gap recovery");
 
         // Phase 5: Verify data path still works after gap event.
         // The injected frame advanced consumption past the sender's current
         // pub_position. We must offer enough frames to catch up before
         // per-RTT sender_limit checks work again. Offer 20 frames in bulk
         // and verify sender_limit advances at some point.
-        let limit_post_gap = h.sender
-            .publication_sender_limit(h.pub_idx)
-            .unwrap_or(0);
+        let limit_post_gap = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
         for _ in 0..20 {
             offer_one(&mut h.sender, h.pub_idx, &payload);
         }
@@ -288,9 +284,7 @@ mod loss_recovery_e2e {
             let _ = h.sender.do_work();
             let _ = h.receiver.do_work();
             let _ = h.sender.do_work();
-            let current = h.sender
-                .publication_sender_limit(h.pub_idx)
-                .unwrap_or(0);
+            let current = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
             let diff = current.wrapping_sub(limit_post_gap);
             if diff > 0 && diff < (i64::MAX >> 1) {
                 caught_up = true;
@@ -327,9 +321,7 @@ mod loss_recovery_e2e {
             );
         }
 
-        let limit_before = h.sender
-            .publication_sender_limit(h.pub_idx)
-            .unwrap_or(0);
+        let limit_before = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
 
         // Phase 2: Offer frames 4, 5, 6 (offsets 256, 320, 384) on sender.
         // Don't send yet - they exist in the term buffer for retransmit.
@@ -340,11 +332,8 @@ mod loss_recovery_e2e {
         // Phase 3: Inject frames at offsets 384 and 512 (skipping 256, 320, 448).
         // This creates gaps at 256 (from frame 4) and potentially at 448.
         // But we only care that the receiver sees out-of-order delivery.
-        let frame_at_384 = build_raw_data_frame(
-            SESSION_ID, STREAM_ID, INITIAL_TERM_ID,
-            384,
-            &[0xDDu8; 4],
-        );
+        let frame_at_384 =
+            build_raw_data_frame(SESSION_ID, STREAM_ID, INITIAL_TERM_ID, 384, &[0xDDu8; 4]);
         inject_frame(h.recv_port, &frame_at_384);
 
         // Phase 4: Spin duty cycles to process everything.
@@ -356,16 +345,17 @@ mod loss_recovery_e2e {
             let _ = h.receiver.do_work();
             let _ = h.sender.do_work();
 
-            let current = h.sender
-                .publication_sender_limit(h.pub_idx)
-                .unwrap_or(0);
+            let current = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
             let diff = current.wrapping_sub(limit_before);
             if diff > 0 && diff < (i64::MAX >> 1) {
                 limit_advanced = true;
                 break;
             }
         }
-        assert!(limit_advanced, "sender_limit should advance after multiple gap recovery");
+        assert!(
+            limit_advanced,
+            "sender_limit should advance after multiple gap recovery"
+        );
 
         // Phase 5: Verify continued operation.
         for i in 0..10u32 {
@@ -396,9 +386,7 @@ mod loss_recovery_e2e {
             );
         }
 
-        let limit_before = h.sender
-            .publication_sender_limit(h.pub_idx)
-            .unwrap_or(0);
+        let limit_before = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
 
         // Offer frame at next offset, don't send.
         assert!(offer_one(&mut h.sender, h.pub_idx, &payload));
@@ -406,11 +394,8 @@ mod loss_recovery_e2e {
         // Inject frame 2 positions ahead to create a gap.
         // Current expected is at offset 256 (4 frames * 64 bytes).
         // Inject at offset 320 (skipping 256).
-        let injected = build_raw_data_frame(
-            SESSION_ID, STREAM_ID, INITIAL_TERM_ID,
-            320,
-            &[0xFFu8; 4],
-        );
+        let injected =
+            build_raw_data_frame(SESSION_ID, STREAM_ID, INITIAL_TERM_ID, 320, &[0xFFu8; 4]);
         inject_frame(h.recv_port, &injected);
 
         // Count cycles needed for sender_limit to advance.
@@ -422,9 +407,7 @@ mod loss_recovery_e2e {
             let _ = h.sender.do_work();
             cycles += 1;
 
-            let current = h.sender
-                .publication_sender_limit(h.pub_idx)
-                .unwrap_or(0);
+            let current = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
             let diff = current.wrapping_sub(limit_before);
             if diff > 0 && diff < (i64::MAX >> 1) {
                 advanced = true;
@@ -447,9 +430,7 @@ mod loss_recovery_e2e {
         let mut h = setup_harness();
         let payload = [0x11u8; 4];
 
-        let mut prev_limit = h.sender
-            .publication_sender_limit(h.pub_idx)
-            .unwrap_or(0);
+        let mut prev_limit = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
 
         // Send 10 normal RTTs, record each sender_limit.
         for i in 0..10u32 {
@@ -457,9 +438,7 @@ mod loss_recovery_e2e {
                 run_one_rtt(&mut h.sender, &mut h.receiver, h.pub_idx, &payload),
                 "pre-gap RTT #{i} should complete"
             );
-            let current = h.sender
-                .publication_sender_limit(h.pub_idx)
-                .unwrap_or(0);
+            let current = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
             let diff = current.wrapping_sub(prev_limit);
             assert!(
                 diff >= 0 || diff.unsigned_abs() > (i64::MAX as u64 >> 1),
@@ -471,11 +450,8 @@ mod loss_recovery_e2e {
         // Inject a gap.
         assert!(offer_one(&mut h.sender, h.pub_idx, &payload));
         // expected is at 640 (10 frames * 64). Inject at 704 (skipping 640).
-        let injected = build_raw_data_frame(
-            SESSION_ID, STREAM_ID, INITIAL_TERM_ID,
-            704,
-            &[0x22u8; 4],
-        );
+        let injected =
+            build_raw_data_frame(SESSION_ID, STREAM_ID, INITIAL_TERM_ID, 704, &[0x22u8; 4]);
         inject_frame(h.recv_port, &injected);
 
         // Bulk-offer frames to pass the injection point. The injected frame
@@ -489,9 +465,7 @@ mod loss_recovery_e2e {
             let _ = h.sender.do_work();
             let _ = h.receiver.do_work();
             let _ = h.sender.do_work();
-            let current = h.sender
-                .publication_sender_limit(h.pub_idx)
-                .unwrap_or(0);
+            let current = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
             let diff = current.wrapping_sub(prev_limit);
             if diff > 0 && diff < (i64::MAX >> 1) {
                 prev_limit = current;
@@ -507,9 +481,7 @@ mod loss_recovery_e2e {
                 run_one_rtt(&mut h.sender, &mut h.receiver, h.pub_idx, &payload),
                 "post-gap RTT #{i} should complete"
             );
-            let current = h.sender
-                .publication_sender_limit(h.pub_idx)
-                .unwrap_or(0);
+            let current = h.sender.publication_sender_limit(h.pub_idx).unwrap_or(0);
             let diff = current.wrapping_sub(prev_limit);
             assert!(
                 diff >= 0 || diff.unsigned_abs() > (i64::MAX as u64 >> 1),
@@ -519,4 +491,3 @@ mod loss_recovery_e2e {
         }
     }
 }
-

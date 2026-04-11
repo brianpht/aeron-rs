@@ -35,8 +35,8 @@ impl IdleStrategy {
         IdleStrategy::Backoff {
             max_spins: 10,
             max_yields: 5,
-            min_park_ns: 1_000,       // 1 us
-            max_park_ns: 1_000_000,   // 1 ms
+            min_park_ns: 1_000,     // 1 us
+            max_park_ns: 1_000_000, // 1 ms
         }
     }
 
@@ -114,7 +114,11 @@ pub fn idle(strategy: &IdleStrategy, state: &mut IdleStrategyState, work_count: 
             thread::park_timeout(Duration::from_nanos(state.park_ns));
             // Ramp toward max_park_ns (saturating add, capped).
             let next = state.park_ns.saturating_add(*min_park_ns);
-            state.park_ns = if next > *max_park_ns { *max_park_ns } else { next };
+            state.park_ns = if next > *max_park_ns {
+                *max_park_ns
+            } else {
+                next
+            };
         }
     }
 }
@@ -305,4 +309,3 @@ mod tests {
         assert_eq!(noop_state.park_ns, 0);
     }
 }
-

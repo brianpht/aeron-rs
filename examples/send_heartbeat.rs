@@ -11,9 +11,9 @@
 
 use std::net::SocketAddr;
 
-use aeron_rs::context::DriverContext;
-use aeron_rs::agent::sender::SenderAgent;
 use aeron_rs::agent::runner::AgentRunner;
+use aeron_rs::agent::sender::SenderAgent;
+use aeron_rs::context::DriverContext;
 use aeron_rs::media::channel::UdpChannel;
 use aeron_rs::media::send_channel_endpoint::SendChannelEndpoint;
 use aeron_rs::media::transport::UdpChannelTransport;
@@ -21,8 +21,7 @@ use aeron_rs::media::transport::UdpChannelTransport;
 fn main() {
     let ctx = DriverContext::default();
 
-    let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:40123")
-        .expect("channel parse");
+    let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:40123").expect("channel parse");
 
     let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let remote_addr = channel.remote_data;

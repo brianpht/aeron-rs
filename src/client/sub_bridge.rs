@@ -18,8 +18,8 @@
 // - Data is written under EMPTY, read under FILLED (no concurrent access)
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 use crate::media::shared_image::SubscriberImage;
@@ -37,8 +37,10 @@ const SLOT_FILLED: u8 = 1;
 /// Created by the receiver, consumed by the subscription. Moved, not copied.
 pub(crate) struct PendingImage {
     pub image: SubscriberImage,
+    #[allow(dead_code)]
     pub session_id: i32,
     pub stream_id: i32,
+    #[allow(dead_code)]
     pub correlation_id: i64,
 }
 
@@ -86,7 +88,9 @@ impl SubscriptionBridge {
             if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
                 // SAFETY: Single producer. State is EMPTY so no consumer
                 // is reading this slot. Write the data, then publish.
-                unsafe { *slot.data.get() = Some(item); }
+                unsafe {
+                    *slot.data.get() = Some(item);
+                }
                 slot.state.store(SLOT_FILLED, Ordering::Release);
                 return true;
             }
@@ -132,12 +136,11 @@ impl SubscriptionBridge {
     }
 
     /// Number of slots in the bridge.
+    #[allow(dead_code)]
     pub(crate) fn capacity(&self) -> usize {
         self.slots.len()
     }
 }
-
-// ---- Receive endpoint bridge (client -> receiver agent) ----
 
 /// Everything the receiver agent needs to add a receive endpoint.
 /// Created by the client (add_subscription), consumed by the receiver.
@@ -192,7 +195,9 @@ impl RecvEndpointBridge {
             if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
                 // SAFETY: Single producer. State is EMPTY so no consumer
                 // is reading this slot.
-                unsafe { *slot.data.get() = Some(item); }
+                unsafe {
+                    *slot.data.get() = Some(item);
+                }
                 slot.state.store(SLOT_FILLED, Ordering::Release);
                 return true;
             }
@@ -276,7 +281,10 @@ mod tests {
         assert_eq!(item.correlation_id, 100);
 
         // Slot should be empty now.
-        assert!(bridge.try_take(0).is_none(), "slot should be empty after take");
+        assert!(
+            bridge.try_take(0).is_none(),
+            "slot should be empty after take"
+        );
     }
 
     #[test]
@@ -394,4 +402,3 @@ mod tests {
         assert_eq!(taken_ids, (0..10).collect::<Vec<i32>>());
     }
 }
-

@@ -11,9 +11,9 @@
 
 use std::net::SocketAddr;
 
-use aeron_rs::context::DriverContext;
 use aeron_rs::agent::receiver::ReceiverAgent;
 use aeron_rs::agent::runner::AgentRunner;
+use aeron_rs::context::DriverContext;
 use aeron_rs::media::channel::UdpChannel;
 use aeron_rs::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 use aeron_rs::media::transport::UdpChannelTransport;
@@ -21,8 +21,7 @@ use aeron_rs::media::transport::UdpChannelTransport;
 fn main() {
     let ctx = DriverContext::default();
 
-    let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:40124")
-        .expect("channel parse");
+    let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:40124").expect("channel parse");
 
     let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let remote_addr = channel.remote_data;
@@ -37,7 +36,9 @@ fn main() {
     let mut agent = ReceiverAgent::new(&ctx).expect("receiver agent");
     let _ep_idx = agent.add_endpoint(endpoint).expect("add endpoint");
 
-    println!("Starting receiver agent on dedicated thread (100 ms run, no sender - no data expected)...");
+    println!(
+        "Starting receiver agent on dedicated thread (100 ms run, no sender - no data expected)..."
+    );
     let runner = AgentRunner::new(agent, ctx.idle_strategy());
     let handle = runner.start();
 

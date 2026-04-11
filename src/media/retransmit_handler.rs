@@ -138,6 +138,7 @@ impl RetransmitHandler {
     /// For each Linger past expiry: transitions to Inactive (frees slot).
     ///
     /// Zero-allocation, O(MAX_RETRANSMIT_ACTIONS). Hot path.
+    #[allow(clippy::manual_range_contains)]
     pub fn process_timeouts<F>(&mut self, now_ns: i64, mut on_retransmit: F)
     where
         F: FnMut(i32, i32, i32, i32, i32),
@@ -366,4 +367,3 @@ mod tests {
         assert_eq!(handler.active_count(), 0);
     }
 }
-

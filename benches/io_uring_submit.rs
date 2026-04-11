@@ -13,7 +13,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use io_uring::{opcode, IoUring};
+use io_uring::{IoUring, opcode};
 
 // ──────────────────── NOP benchmarks ────────────────────
 
@@ -259,13 +259,11 @@ fn bench_uring_udp_recvmsg_reap_only(c: &mut Criterion) {
             || {
                 let ring = unsafe { &mut *ring_ptr };
                 let hdr = unsafe { &mut *hdr_ptr };
-                hdr.msg_namelen =
-                    std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
                 hdr.msg_flags = 0;
-                let sqe =
-                    opcode::RecvMsg::new(io_uring::types::Fd(fd), hdr as *mut libc::msghdr)
-                        .build()
-                        .user_data(0x1);
+                let sqe = opcode::RecvMsg::new(io_uring::types::Fd(fd), hdr as *mut libc::msghdr)
+                    .build()
+                    .user_data(0x1);
                 unsafe {
                     ring.submission().push(&sqe).unwrap();
                 }
@@ -321,13 +319,11 @@ fn bench_uring_udp_recvmsg_rearm_submit(c: &mut Criterion) {
             || {
                 let ring = unsafe { &mut *ring_ptr };
                 let hdr = unsafe { &mut *hdr_ptr };
-                hdr.msg_namelen =
-                    std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
                 hdr.msg_flags = 0;
-                let sqe =
-                    opcode::RecvMsg::new(io_uring::types::Fd(fd), hdr as *mut libc::msghdr)
-                        .build()
-                        .user_data(0x1);
+                let sqe = opcode::RecvMsg::new(io_uring::types::Fd(fd), hdr as *mut libc::msghdr)
+                    .build()
+                    .user_data(0x1);
                 unsafe {
                     ring.submission().push(&sqe).unwrap();
                 }
@@ -344,13 +340,11 @@ fn bench_uring_udp_recvmsg_rearm_submit(c: &mut Criterion) {
                     black_box(cqe.result());
                 }
                 // 2. Re-arm: reset volatile fields + push RecvMsg SQE.
-                hdr.msg_namelen =
-                    std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
                 hdr.msg_flags = 0;
-                let sqe =
-                    opcode::RecvMsg::new(io_uring::types::Fd(fd), hdr as *mut libc::msghdr)
-                        .build()
-                        .user_data(0x1);
+                let sqe = opcode::RecvMsg::new(io_uring::types::Fd(fd), hdr as *mut libc::msghdr)
+                    .build()
+                    .user_data(0x1);
                 unsafe {
                     ring.submission().push(&sqe).unwrap();
                 }
@@ -369,8 +363,8 @@ fn bench_uring_udp_recvmsg_rearm_submit(c: &mut Criterion) {
 /// This is the NEW baseline after the multishot migration.
 ///   improvement = bench_recvmsg_rearm_submit − this_benchmark
 fn bench_uring_udp_recvmsg_multishot(c: &mut Criterion) {
-    use io_uring::types::{BufRingEntry, RecvMsgOut};
     use io_uring::cqueue;
+    use io_uring::types::{BufRingEntry, RecvMsgOut};
     use std::net::UdpSocket;
     use std::os::unix::io::AsRawFd;
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -392,28 +386,24 @@ fn bench_uring_udp_recvmsg_multishot(c: &mut Criterion) {
     let entry_size = std::mem::size_of::<BufRingEntry>();
     let ring_size = entry_size * BUF_COUNT as usize;
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-    let ring_layout =
-        std::alloc::Layout::from_size_align(ring_size, page_size).unwrap();
+    let ring_layout = std::alloc::Layout::from_size_align(ring_size, page_size).unwrap();
     let ring_ptr = unsafe { std::alloc::alloc_zeroed(ring_layout) };
     assert!(!ring_ptr.is_null());
 
     let bufs_total = BUF_SIZE as usize * BUF_COUNT as usize;
-    let bufs_layout =
-        std::alloc::Layout::from_size_align(bufs_total, 64).unwrap();
+    let bufs_layout = std::alloc::Layout::from_size_align(bufs_total, 64).unwrap();
     let bufs_ptr = unsafe { std::alloc::alloc_zeroed(bufs_layout) };
     assert!(!bufs_ptr.is_null());
 
     for i in 0..BUF_COUNT as usize {
-        let entry =
-            unsafe { &mut *(ring_ptr.add(i * entry_size) as *mut BufRingEntry) };
+        let entry = unsafe { &mut *(ring_ptr.add(i * entry_size) as *mut BufRingEntry) };
         let buf_addr = unsafe { bufs_ptr.add(i * BUF_SIZE as usize) };
         entry.set_addr(buf_addr as u64);
         entry.set_len(BUF_SIZE);
         entry.set_bid(i as u16);
     }
 
-    let tail_ptr =
-        unsafe { BufRingEntry::tail(ring_ptr as *const BufRingEntry) as *mut u16 };
+    let tail_ptr = unsafe { BufRingEntry::tail(ring_ptr as *const BufRingEntry) as *mut u16 };
     unsafe {
         AtomicU16::from_ptr(tail_ptr).store(BUF_COUNT, Ordering::Release);
     }
@@ -426,8 +416,7 @@ fn bench_uring_udp_recvmsg_multishot(c: &mut Criterion) {
 
     // ── Template msghdr for multishot ──
     let mut msghdr_template: libc::msghdr = unsafe { std::mem::zeroed() };
-    msghdr_template.msg_namelen =
-        std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    msghdr_template.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
 
     // ── Submit the multishot RecvMsgMulti SQE ──
     let msghdr_ptr = &msghdr_template as *const libc::msghdr;
@@ -468,10 +457,7 @@ fn bench_uring_udp_recvmsg_multishot(c: &mut Criterion) {
                         if result > 0 {
                             let offset = buf_id as usize * BUF_SIZE as usize;
                             let buf = unsafe {
-                                std::slice::from_raw_parts(
-                                    bufs_ptr.add(offset),
-                                    result as usize,
-                                )
+                                std::slice::from_raw_parts(bufs_ptr.add(offset), result as usize)
                             };
                             if let Ok(out) = RecvMsgOut::parse(buf, &msghdr_template) {
                                 black_box(out.payload_data().len());
@@ -481,19 +467,15 @@ fn bench_uring_udp_recvmsg_multishot(c: &mut Criterion) {
                         let lt = unsafe { &mut *local_tail_ptr };
                         let idx = (*lt & mask) as usize;
                         let entry = unsafe {
-                            &mut *(ring_ptr_atomic.add(idx * entry_size)
-                                as *mut BufRingEntry)
+                            &mut *(ring_ptr_atomic.add(idx * entry_size) as *mut BufRingEntry)
                         };
-                        let buf_addr = unsafe {
-                            bufs_ptr.add(buf_id as usize * BUF_SIZE as usize)
-                        };
+                        let buf_addr = unsafe { bufs_ptr.add(buf_id as usize * BUF_SIZE as usize) };
                         entry.set_addr(buf_addr as u64);
                         entry.set_len(BUF_SIZE);
                         entry.set_bid(buf_id);
                         *lt = lt.wrapping_add(1);
                         unsafe {
-                            AtomicU16::from_ptr(tail_ptr)
-                                .store(*lt, Ordering::Release);
+                            AtomicU16::from_ptr(tail_ptr).store(*lt, Ordering::Release);
                         }
                     }
 
@@ -526,4 +508,3 @@ criterion_group!(
     bench_uring_udp_recvmsg_multishot,
 );
 criterion_main!(benches);
-

@@ -1,12 +1,11 @@
-
 // Receive channel endpoint - receives data, sends control messages (SM, NAK, RTTM).
 
 use libc;
 
-use crate::frame::*;
 use super::channel::UdpChannel;
 use super::poller::{PollError, TransportPoller};
 use super::transport::UdpChannelTransport;
+use crate::frame::*;
 
 // ── Pre-sized capacity for pending control messages ──
 const MAX_PENDING_SM: usize = 64;
@@ -55,11 +54,7 @@ pub trait DataFrameHandler {
         source: &libc::sockaddr_storage,
     );
 
-    fn on_setup(
-        &mut self,
-        setup: &SetupHeader,
-        source: &libc::sockaddr_storage,
-    );
+    fn on_setup(&mut self, setup: &SetupHeader, source: &libc::sockaddr_storage);
 }
 
 /// A receive channel endpoint manages a UDP transport for receiving
@@ -185,13 +180,8 @@ impl ReceiveChannelEndpoint {
     }
 
     /// Send all pending control messages via the poller (monomorphized).
-    pub fn send_pending<P: TransportPoller>(
-        &mut self,
-        poller: &mut P,
-    ) -> Result<u32, PollError> {
-        let idx = self
-            .transport_idx
-            .ok_or(PollError::NotRegistered)?;
+    pub fn send_pending<P: TransportPoller>(&mut self, poller: &mut P) -> Result<u32, PollError> {
+        let idx = self.transport_idx.ok_or(PollError::NotRegistered)?;
         let mut count = 0u32;
 
         // Send SMs.
@@ -348,7 +338,11 @@ mod tests {
 
     impl StubHandler {
         fn new() -> Self {
-            Self { data_count: 0, setup_count: 0, last_session_id: 0 }
+            Self {
+                data_count: 0,
+                setup_count: 0,
+                last_session_id: 0,
+            }
         }
     }
 
@@ -363,11 +357,7 @@ mod tests {
             self.last_session_id = data_header.session_id;
         }
 
-        fn on_setup(
-            &mut self,
-            setup: &SetupHeader,
-            _source: &libc::sockaddr_storage,
-        ) {
+        fn on_setup(&mut self, setup: &SetupHeader, _source: &libc::sockaddr_storage) {
             self.setup_count += 1;
             self.last_session_id = setup.session_id;
         }
@@ -450,7 +440,11 @@ mod tests {
 
     // ── RTTM echo tests ──
 
-    fn build_rttm_request(session_id: i32, stream_id: i32, echo_ts: i64) -> [u8; RTTM_TOTAL_LENGTH] {
+    fn build_rttm_request(
+        session_id: i32,
+        stream_id: i32,
+        echo_ts: i64,
+    ) -> [u8; RTTM_TOTAL_LENGTH] {
         let rttm = RttmHeader {
             frame_header: FrameHeader {
                 frame_length: RTTM_TOTAL_LENGTH as i32,

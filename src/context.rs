@@ -50,9 +50,7 @@ impl std::fmt::Display for ContextValidationError {
             Self::BufRingEntriesNotPowerOfTwo => {
                 f.write_str("uring_buf_ring_entries must be power-of-two")
             }
-            Self::BufRingEntriesTooLarge => {
-                f.write_str("uring_buf_ring_entries must be <= 32768")
-            }
+            Self::BufRingEntriesTooLarge => f.write_str("uring_buf_ring_entries must be <= 32768"),
             Self::BufRingEntriesZero => f.write_str("uring_buf_ring_entries must be > 0"),
             Self::SendSlotsZero => f.write_str("uring_send_slots must be > 0"),
             Self::MtuOutOfRange => write!(f, "mtu_length must be in [64, {MAX_RECV_BUFFER}]"),
@@ -65,16 +63,12 @@ impl std::fmt::Display for ContextValidationError {
             Self::TermBufferLengthInvalid => {
                 f.write_str("term_buffer_length must be power-of-two >= 32")
             }
-            Self::RetransmitLingerZero => {
-                f.write_str("retransmit_unicast_linger_ns must be > 0")
-            }
+            Self::RetransmitLingerZero => f.write_str("retransmit_unicast_linger_ns must be > 0"),
             Self::RttmIntervalZero => f.write_str("rttm_interval_ns must be > 0"),
             Self::MaxReceiverImagesInvalid => {
                 f.write_str("max_receiver_images must be in [1, 256]")
             }
-            Self::IdleMinParkZero => {
-                f.write_str("idle_strategy_min_park_ns must be > 0")
-            }
+            Self::IdleMinParkZero => f.write_str("idle_strategy_min_park_ns must be > 0"),
             Self::IdleMaxParkLessThanMin => {
                 f.write_str("idle_strategy_max_park_ns must be >= min_park_ns")
             }
@@ -177,8 +171,8 @@ impl Default for DriverContext {
 
             idle_strategy_max_spins: 10,
             idle_strategy_max_yields: 5,
-            idle_strategy_min_park_ns: 1_000,       // 1 us
-            idle_strategy_max_park_ns: 1_000_000,   // 1 ms
+            idle_strategy_min_park_ns: 1_000,     // 1 us
+            idle_strategy_max_park_ns: 1_000_000, // 1 ms
         }
     }
 }
@@ -260,6 +254,7 @@ impl DriverContext {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
     use super::*;
 
     #[test]
@@ -290,7 +285,10 @@ mod tests {
     fn default_sender_params() {
         let ctx = DriverContext::default();
         assert_eq!(ctx.send_duty_cycle_ratio, 4);
-        assert_eq!(ctx.heartbeat_interval_ns, Duration::from_millis(100).as_nanos() as i64);
+        assert_eq!(
+            ctx.heartbeat_interval_ns,
+            Duration::from_millis(100).as_nanos() as i64
+        );
         assert_eq!(ctx.term_buffer_length, 64 * 1024);
         assert_eq!(ctx.retransmit_unicast_delay_ns, 0);
         assert_eq!(
@@ -302,17 +300,32 @@ mod tests {
     #[test]
     fn default_receiver_params() {
         let ctx = DriverContext::default();
-        assert_eq!(ctx.sm_interval_ns, Duration::from_millis(200).as_nanos() as i64);
-        assert_eq!(ctx.nak_delay_ns, Duration::from_millis(60).as_nanos() as i64);
-        assert_eq!(ctx.rttm_interval_ns, Duration::from_secs(1).as_nanos() as i64);
+        assert_eq!(
+            ctx.sm_interval_ns,
+            Duration::from_millis(200).as_nanos() as i64
+        );
+        assert_eq!(
+            ctx.nak_delay_ns,
+            Duration::from_millis(60).as_nanos() as i64
+        );
+        assert_eq!(
+            ctx.rttm_interval_ns,
+            Duration::from_secs(1).as_nanos() as i64
+        );
         assert_eq!(ctx.max_receiver_images, 256);
     }
 
     #[test]
     fn default_general_params() {
         let ctx = DriverContext::default();
-        assert_eq!(ctx.driver_timeout_ns, Duration::from_secs(10).as_nanos() as i64);
-        assert_eq!(ctx.timer_interval_ns, Duration::from_millis(1).as_nanos() as i64);
+        assert_eq!(
+            ctx.driver_timeout_ns,
+            Duration::from_secs(10).as_nanos() as i64
+        );
+        assert_eq!(
+            ctx.timer_interval_ns,
+            Duration::from_millis(1).as_nanos() as i64
+        );
     }
 
     // ── Validation tests ──
@@ -327,28 +340,40 @@ mod tests {
     fn validate_ring_size_not_power_of_two() {
         let mut ctx = DriverContext::default();
         ctx.uring_ring_size = 100;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::RingSizeNotPowerOfTwo));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::RingSizeNotPowerOfTwo)
+        );
     }
 
     #[test]
     fn validate_ring_size_zero() {
         let mut ctx = DriverContext::default();
         ctx.uring_ring_size = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::RingSizeNotPowerOfTwo));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::RingSizeNotPowerOfTwo)
+        );
     }
 
     #[test]
     fn validate_buf_ring_entries_not_power_of_two() {
         let mut ctx = DriverContext::default();
         ctx.uring_buf_ring_entries = 100;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::BufRingEntriesNotPowerOfTwo));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::BufRingEntriesNotPowerOfTwo)
+        );
     }
 
     #[test]
     fn validate_buf_ring_entries_zero() {
         let mut ctx = DriverContext::default();
         ctx.uring_buf_ring_entries = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::BufRingEntriesZero));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::BufRingEntriesZero)
+        );
     }
 
     #[test]
@@ -386,7 +411,10 @@ mod tests {
     fn validate_heartbeat_interval_zero() {
         let mut ctx = DriverContext::default();
         ctx.heartbeat_interval_ns = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::HeartbeatIntervalZero));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::HeartbeatIntervalZero)
+        );
     }
 
     #[test]
@@ -400,7 +428,10 @@ mod tests {
     fn validate_sm_interval_negative() {
         let mut ctx = DriverContext::default();
         ctx.sm_interval_ns = -1;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::SmIntervalNegative));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::SmIntervalNegative)
+        );
     }
 
     #[test]
@@ -414,35 +445,50 @@ mod tests {
     fn validate_timer_interval_zero() {
         let mut ctx = DriverContext::default();
         ctx.timer_interval_ns = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::TimerIntervalZero));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::TimerIntervalZero)
+        );
     }
 
     #[test]
     fn validate_socket_rcvbuf_zero() {
         let mut ctx = DriverContext::default();
         ctx.socket_rcvbuf = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::SocketRcvbufZero));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::SocketRcvbufZero)
+        );
     }
 
     #[test]
     fn validate_socket_sndbuf_zero() {
         let mut ctx = DriverContext::default();
         ctx.socket_sndbuf = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::SocketSndbufZero));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::SocketSndbufZero)
+        );
     }
 
     #[test]
     fn validate_term_buffer_length_zero() {
         let mut ctx = DriverContext::default();
         ctx.term_buffer_length = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::TermBufferLengthInvalid));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::TermBufferLengthInvalid)
+        );
     }
 
     #[test]
     fn validate_term_buffer_length_not_power_of_two() {
         let mut ctx = DriverContext::default();
         ctx.term_buffer_length = 100;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::TermBufferLengthInvalid));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::TermBufferLengthInvalid)
+        );
     }
 
     #[test]
@@ -450,7 +496,10 @@ mod tests {
         let mut ctx = DriverContext::default();
         // 16 < 32 (FRAME_ALIGNMENT)
         ctx.term_buffer_length = 16;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::TermBufferLengthInvalid));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::TermBufferLengthInvalid)
+        );
     }
 
     #[test]
@@ -491,14 +540,20 @@ mod tests {
     fn validate_rttm_interval_zero() {
         let mut ctx = DriverContext::default();
         ctx.rttm_interval_ns = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::RttmIntervalZero));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::RttmIntervalZero)
+        );
     }
 
     #[test]
     fn validate_rttm_interval_negative() {
         let mut ctx = DriverContext::default();
         ctx.rttm_interval_ns = -1;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::RttmIntervalZero));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::RttmIntervalZero)
+        );
     }
 
     #[test]
@@ -560,7 +615,10 @@ mod tests {
         let mut ctx = DriverContext::default();
         ctx.idle_strategy_min_park_ns = 1000;
         ctx.idle_strategy_max_park_ns = 500;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::IdleMaxParkLessThanMin));
+        assert_eq!(
+            ctx.validate(),
+            Err(ContextValidationError::IdleMaxParkLessThanMin)
+        );
     }
 
     #[test]
@@ -577,7 +635,10 @@ mod tests {
         let strategy = ctx.idle_strategy();
         match strategy {
             crate::agent::idle_strategy::IdleStrategy::Backoff {
-                max_spins, max_yields, min_park_ns, max_park_ns,
+                max_spins,
+                max_yields,
+                min_park_ns,
+                max_park_ns,
             } => {
                 assert_eq!(max_spins, 10);
                 assert_eq!(max_yields, 5);

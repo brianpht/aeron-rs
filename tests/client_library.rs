@@ -8,13 +8,11 @@
 // frames via a separate UdpSocket, and verify Subscription::poll()
 // delivers the fragments.
 
-use aeron_rs::client::{MediaDriver, Aeron, Publication, Subscription};
+use aeron_rs::client::{Aeron, MediaDriver, Publication, Subscription};
 use aeron_rs::context::DriverContext;
 use aeron_rs::frame::{
-    FrameHeader, DataHeader, SetupHeader,
-    CURRENT_VERSION, DATA_HEADER_LENGTH,
-    FRAME_TYPE_SETUP, FRAME_TYPE_DATA,
-    DATA_FLAG_BEGIN, DATA_FLAG_END, SETUP_TOTAL_LENGTH,
+    CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END, DATA_HEADER_LENGTH, DataHeader,
+    FRAME_TYPE_DATA, FRAME_TYPE_SETUP, FrameHeader, SETUP_TOTAL_LENGTH, SetupHeader,
 };
 use aeron_rs::media::network_publication::OfferError;
 
@@ -54,10 +52,9 @@ fn add_publication_returns_publication() {
     let driver = MediaDriver::launch(ctx).expect("launch");
     let mut aeron = driver.connect().expect("connect");
 
-    let publication = aeron.add_publication(
-        "aeron:udp?endpoint=127.0.0.1:40199",
-        10,
-    ).expect("add_publication");
+    let publication = aeron
+        .add_publication("aeron:udp?endpoint=127.0.0.1:40199", 10)
+        .expect("add_publication");
 
     assert_eq!(publication.stream_id(), 10);
     assert_eq!(publication.term_length(), 1024);
@@ -74,10 +71,9 @@ fn publication_offer_advances_position() {
     let driver = MediaDriver::launch(ctx).expect("launch");
     let mut aeron = driver.connect().expect("connect");
 
-    let mut publication = aeron.add_publication(
-        "aeron:udp?endpoint=127.0.0.1:40200",
-        10,
-    ).expect("add_publication");
+    let mut publication = aeron
+        .add_publication("aeron:udp?endpoint=127.0.0.1:40200", 10)
+        .expect("add_publication");
 
     // Offer a frame.
     let result = publication.offer(&[0xDE, 0xAD, 0xBE, 0xEF]);
@@ -88,7 +84,8 @@ fn publication_offer_advances_position() {
         }
         Err(OfferError::AdminAction) => {
             // Term rotation - retry.
-            let pos = publication.offer(&[0xDE, 0xAD, 0xBE, 0xEF])
+            let pos = publication
+                .offer(&[0xDE, 0xAD, 0xBE, 0xEF])
                 .expect("offer after admin action");
             assert!(pos > 0);
         }
@@ -106,14 +103,12 @@ fn multiple_publications_on_different_streams() {
     let driver = MediaDriver::launch(ctx).expect("launch");
     let mut aeron = driver.connect().expect("connect");
 
-    let pub1 = aeron.add_publication(
-        "aeron:udp?endpoint=127.0.0.1:40201",
-        10,
-    ).expect("pub1");
-    let pub2 = aeron.add_publication(
-        "aeron:udp?endpoint=127.0.0.1:40202",
-        20,
-    ).expect("pub2");
+    let pub1 = aeron
+        .add_publication("aeron:udp?endpoint=127.0.0.1:40201", 10)
+        .expect("pub1");
+    let pub2 = aeron
+        .add_publication("aeron:udp?endpoint=127.0.0.1:40202", 20)
+        .expect("pub2");
 
     assert_eq!(pub1.stream_id(), 10);
     assert_eq!(pub2.stream_id(), 20);
@@ -131,10 +126,9 @@ fn add_subscription_returns_subscription() {
     let driver = MediaDriver::launch(ctx).expect("launch");
     let mut aeron = driver.connect().expect("connect");
 
-    let sub = aeron.add_subscription(
-        "aeron:udp?endpoint=127.0.0.1:40203",
-        30,
-    ).expect("add_subscription");
+    let sub = aeron
+        .add_subscription("aeron:udp?endpoint=127.0.0.1:40203", 30)
+        .expect("add_subscription");
 
     assert_eq!(sub.stream_id(), 30);
     assert_eq!(sub.channel(), "aeron:udp?endpoint=127.0.0.1:40203");
@@ -150,10 +144,9 @@ fn publication_channel_accessor() {
     let driver = MediaDriver::launch(ctx).expect("launch");
     let mut aeron = driver.connect().expect("connect");
 
-    let publication = aeron.add_publication(
-        "aeron:udp?endpoint=127.0.0.1:40204",
-        10,
-    ).expect("add_publication");
+    let publication = aeron
+        .add_publication("aeron:udp?endpoint=127.0.0.1:40204", 10)
+        .expect("add_publication");
 
     assert_eq!(publication.channel(), "aeron:udp?endpoint=127.0.0.1:40204");
     assert!(publication.registration_id() > 0);
@@ -215,10 +208,9 @@ fn publication_offer_and_sender_picks_up() {
     let driver = MediaDriver::launch(ctx).expect("launch");
     let mut aeron = driver.connect().expect("connect");
 
-    let mut publication = aeron.add_publication(
-        "aeron:udp?endpoint=127.0.0.1:40205",
-        10,
-    ).expect("add_publication");
+    let mut publication = aeron
+        .add_publication("aeron:udp?endpoint=127.0.0.1:40205", 10)
+        .expect("add_publication");
 
     // Give the sender agent time to poll the bridge and register the endpoint.
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -384,7 +376,12 @@ fn subscription_poll_receives_data() {
     // Step 3: Poll the subscription (with retry loop for timing tolerance).
     let results = poll_until(&mut sub, 1, std::time::Duration::from_secs(2));
 
-    assert_eq!(results.len(), 1, "expected 1 fragment, got {}", results.len());
+    assert_eq!(
+        results.len(),
+        1,
+        "expected 1 fragment, got {}",
+        results.len()
+    );
     assert_eq!(results[0].0, vec![0xDE, 0xAD, 0xBE, 0xEF]);
     assert_eq!(results[0].1, session_id);
     assert_eq!(results[0].2, stream_id);

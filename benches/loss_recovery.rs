@@ -183,4 +183,3 @@ criterion_group!(
     bench_loss_scan_no_gap,
 );
 criterion_main!(benches);
-

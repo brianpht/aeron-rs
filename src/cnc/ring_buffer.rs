@@ -176,17 +176,13 @@ impl MpscRingBuffer {
     #[inline]
     fn head_position_atomic(&self) -> &AtomicI64 {
         // SAFETY: trailer is within the buffer, 8-byte aligned.
-        unsafe {
-            &*(self.buffer.add(self.capacity + HEAD_POSITION_OFFSET) as *const AtomicI64)
-        }
+        unsafe { &*(self.buffer.add(self.capacity + HEAD_POSITION_OFFSET) as *const AtomicI64) }
     }
 
     #[inline]
     fn tail_position_atomic(&self) -> &AtomicI64 {
         // SAFETY: trailer is within the buffer, 8-byte aligned, separate cache line.
-        unsafe {
-            &*(self.buffer.add(self.capacity + TAIL_POSITION_OFFSET) as *const AtomicI64)
-        }
+        unsafe { &*(self.buffer.add(self.capacity + TAIL_POSITION_OFFSET) as *const AtomicI64) }
     }
 
     // ---- Producer (MPSC write) ----
@@ -265,10 +261,7 @@ impl MpscRingBuffer {
                 // Write actual record at offset 0 (wrapped).
                 unsafe {
                     let rec_ptr = self.buffer;
-                    let rec_slice = std::slice::from_raw_parts_mut(
-                        rec_ptr,
-                        aligned_length,
-                    );
+                    let rec_slice = std::slice::from_raw_parts_mut(rec_ptr, aligned_length);
                     // Zero padding region first.
                     for b in rec_slice[RECORD_HEADER_LENGTH + payload.len()..].iter_mut() {
                         *b = 0;
@@ -429,7 +422,10 @@ mod tests {
     fn create_ring_buffer() {
         let (_, rb) = new_heap_ring_buffer(TEST_CAPACITY).expect("create");
         assert_eq!(rb.capacity(), TEST_CAPACITY);
-        assert_eq!(rb.max_message_length(), TEST_CAPACITY - RECORD_HEADER_LENGTH);
+        assert_eq!(
+            rb.max_message_length(),
+            TEST_CAPACITY - RECORD_HEADER_LENGTH
+        );
     }
 
     #[test]
@@ -480,9 +476,9 @@ mod tests {
         });
 
         assert_eq!(count, 10);
-        for i in 0..10 {
-            assert_eq!(received[i].0, i as i32 + 1);
-            let val = u32::from_le_bytes(received[i].1[..4].try_into().unwrap());
+        for (i, item) in received.iter().enumerate().take(10) {
+            assert_eq!(item.0, i as i32 + 1);
+            let val = u32::from_le_bytes(item.1[..4].try_into().unwrap());
             assert_eq!(val, i as u32);
         }
     }
@@ -490,7 +486,9 @@ mod tests {
     #[test]
     fn read_empty_returns_zero() {
         let (_buf, rb) = new_heap_ring_buffer(TEST_CAPACITY).expect("create");
-        let count = rb.read(|_, _| { panic!("should not be called"); });
+        let count = rb.read(|_, _| {
+            panic!("should not be called");
+        });
         assert_eq!(count, 0);
     }
 
@@ -624,4 +622,3 @@ mod tests {
         assert_eq!(required_buffer_size(1024), 1024 + 128);
     }
 }
-

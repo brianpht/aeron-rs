@@ -20,9 +20,9 @@ use std::hint::black_box;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use aeron_rs::agent::Agent;
 use aeron_rs::agent::receiver::ReceiverAgent;
 use aeron_rs::agent::sender::SenderAgent;
-use aeron_rs::agent::Agent;
 use aeron_rs::context::DriverContext;
 use aeron_rs::frame::DATA_HEADER_LENGTH;
 use aeron_rs::media::channel::UdpChannel;
@@ -74,13 +74,12 @@ fn setup_agents() -> (SenderAgent, ReceiverAgent, usize) {
     let ctx = make_bench_ctx();
 
     // -- Receiver side: bind to ephemeral port --
-    let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-        .expect("parse recv channel");
+    let recv_channel =
+        UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
     let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
     let remote = recv_channel.remote_data;
-    let recv_transport =
-        UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-            .expect("open recv transport");
+    let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+        .expect("open recv transport");
     let recv_port = recv_transport.bound_addr.port();
 
     let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -91,9 +90,8 @@ fn setup_agents() -> (SenderAgent, ReceiverAgent, usize) {
     let send_uri = format!("aeron:udp?endpoint=127.0.0.1:{recv_port}");
     let send_channel = UdpChannel::parse(&send_uri).expect("parse send channel");
     let send_remote = send_channel.remote_data;
-    let mut send_transport =
-        UdpChannelTransport::open(&send_channel, &local, &send_remote, &ctx)
-            .expect("open send transport");
+    let mut send_transport = UdpChannelTransport::open(&send_channel, &local, &send_remote, &ctx)
+        .expect("open send transport");
     send_transport
         .connect(&send_remote)
         .expect("connect send transport");
@@ -102,7 +100,14 @@ fn setup_agents() -> (SenderAgent, ReceiverAgent, usize) {
     let mut sender = SenderAgent::new(&ctx).expect("sender agent");
     sender.add_endpoint(send_ep).expect("add send endpoint");
     let pub_idx = sender
-        .add_publication(0, SESSION_ID, STREAM_ID, INITIAL_TERM_ID, BENCH_TERM_LENGTH, BENCH_MTU)
+        .add_publication(
+            0,
+            SESSION_ID,
+            STREAM_ID,
+            INITIAL_TERM_ID,
+            BENCH_TERM_LENGTH,
+            BENCH_MTU,
+        )
         .expect("add publication");
 
     // -- Warmup: spin both agents for Setup/SM handshake --
@@ -118,12 +123,7 @@ fn setup_agents() -> (SenderAgent, ReceiverAgent, usize) {
 /// Offer `n` frames to the publication, retrying AdminAction (term rotation).
 /// Returns the number of frames successfully offered.
 #[inline]
-fn offer_n_frames(
-    sender: &mut SenderAgent,
-    pub_idx: usize,
-    payload: &[u8],
-    n: usize,
-) -> usize {
+fn offer_n_frames(sender: &mut SenderAgent, pub_idx: usize, payload: &[u8], n: usize) -> usize {
     let mut offered = 0usize;
     let mut attempts = 0usize;
     let max_attempts = n * 4; // guard against infinite loop
@@ -327,4 +327,3 @@ criterion_group!(
     bench_combined_duty_cycle,
 );
 criterion_main!(benches);
-

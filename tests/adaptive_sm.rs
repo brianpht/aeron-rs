@@ -16,9 +16,9 @@ mod adaptive_sm {
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
+    use aeron_rs::agent::Agent;
     use aeron_rs::agent::receiver::ReceiverAgent;
     use aeron_rs::agent::sender::SenderAgent;
-    use aeron_rs::agent::Agent;
     use aeron_rs::context::DriverContext;
     use aeron_rs::media::channel::UdpChannel;
     use aeron_rs::media::network_publication::OfferError;
@@ -59,13 +59,12 @@ mod adaptive_sm {
             ..DriverContext::default()
         };
 
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+            .expect("open recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -106,8 +105,7 @@ mod adaptive_sm {
     /// The RTT should complete in a small number of cycles.
     #[test]
     fn adaptive_sm_enables_fast_rtt() {
-        let (mut sender, mut receiver, pub_idx) =
-            setup_agents_with(true, 1);
+        let (mut sender, mut receiver, pub_idx) = setup_agents_with(true, 1);
         let payload = [0xABu8; 64];
 
         let old_limit = sender.publication_sender_limit(pub_idx).unwrap_or(0);
@@ -153,8 +151,7 @@ mod adaptive_sm {
     /// cycle), RTT should still complete but we verify the timer path works.
     #[test]
     fn timer_based_sm_still_works() {
-        let (mut sender, mut receiver, pub_idx) =
-            setup_agents_with(false, 1);
+        let (mut sender, mut receiver, pub_idx) = setup_agents_with(false, 1);
         let payload = [0xABu8; 64];
 
         let old_limit = sender.publication_sender_limit(pub_idx).unwrap_or(0);
@@ -184,10 +181,7 @@ mod adaptive_sm {
                 break;
             }
         }
-        assert!(
-            completed,
-            "timer-based SM should still complete RTT"
-        );
+        assert!(completed, "timer-based SM should still complete RTT");
     }
 
     /// With send_duty_cycle_ratio = 1, the sender polls control on every
@@ -195,8 +189,7 @@ mod adaptive_sm {
     /// be reaped in the same cycle that data was sent, enabling fast RTT.
     #[test]
     fn duty_cycle_ratio_1_enables_fast_control_poll() {
-        let (mut sender, mut receiver, pub_idx) =
-            setup_agents_with(true, 1);
+        let (mut sender, mut receiver, pub_idx) = setup_agents_with(true, 1);
         let payload = [0xABu8; 64];
 
         // Do a few warmup RTTs.
@@ -260,13 +253,12 @@ mod adaptive_sm {
             ..DriverContext::default()
         };
 
-        let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-            .expect("parse recv channel");
+        let recv_channel =
+            UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
         let remote = recv_channel.remote_data;
-        let recv_transport =
-            UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-                .expect("open recv transport");
+        let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+            .expect("open recv transport");
         let recv_port = recv_transport.bound_addr.port();
 
         let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -322,4 +314,3 @@ mod adaptive_sm {
         );
     }
 }
-

@@ -184,7 +184,9 @@ impl SlotPool {
         // The Vec will never be resized after this point (enforced by the
         // SlotPool invariant). Set up stable pointers for the kernel.
         for slot in recv_slots.iter_mut() {
-            unsafe { slot.init_stable_pointers(); }
+            unsafe {
+                slot.init_stable_pointers();
+            }
         }
 
         Self {
@@ -355,7 +357,9 @@ mod tests {
     #[test]
     fn recv_slot_prepare_recv_sets_in_flight() {
         let mut slot = RecvSlot::new();
-        unsafe { slot.prepare_recv(); }
+        unsafe {
+            slot.prepare_recv();
+        }
         assert_eq!(slot.state, SlotState::InFlight);
     }
 

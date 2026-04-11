@@ -11,9 +11,7 @@ use std::cell::UnsafeCell;
 use std::fmt;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::frame::{
-    DATA_HEADER_LENGTH, FRAME_TYPE_PAD, CURRENT_VERSION,
-};
+use crate::frame::{CURRENT_VERSION, DATA_HEADER_LENGTH, FRAME_TYPE_PAD};
 
 // ---- Constants ----
 
@@ -86,8 +84,7 @@ impl RawLog {
         if term_length < MIN_TERM_LENGTH || !term_length.is_power_of_two() {
             return None;
         }
-        let total = (term_length as usize)
-            .checked_mul(PARTITION_COUNT)?;
+        let total = (term_length as usize).checked_mul(PARTITION_COUNT)?;
         let buffer = vec![0u8; total];
         Some(Self {
             buffer,
@@ -204,13 +201,7 @@ impl RawLog {
     /// Returns total bytes scanned.
     ///
     /// Zero-allocation, O(n) in number of frames. Hot path.
-    pub fn scan_frames<F>(
-        &self,
-        partition_idx: usize,
-        offset: u32,
-        limit: u32,
-        mut emit: F,
-    ) -> u32
+    pub fn scan_frames<F>(&self, partition_idx: usize, offset: u32, limit: u32, mut emit: F) -> u32
     where
         F: FnMut(u32, &[u8]),
     {
@@ -231,12 +222,7 @@ impl RawLog {
 
             // Read frame_length field-by-field (little-endian, no pointer cast).
             let p = pos as usize;
-            let frame_length = i32::from_le_bytes([
-                part[p],
-                part[p + 1],
-                part[p + 2],
-                part[p + 3],
-            ]);
+            let frame_length = i32::from_le_bytes([part[p], part[p + 1], part[p + 2], part[p + 3]]);
 
             // Zero or negative frame_length means we hit uncommitted space.
             if frame_length <= 0 {
@@ -251,8 +237,7 @@ impl RawLog {
             }
 
             // Align frame length up to FRAME_ALIGNMENT.
-            let aligned_len = (frame_len_u + FRAME_ALIGNMENT as u32 - 1)
-                & ALIGNMENT_MASK as u32;
+            let aligned_len = (frame_len_u + FRAME_ALIGNMENT as u32 - 1) & ALIGNMENT_MASK as u32;
 
             // Would exceed partition bounds - stop.
             if pos + aligned_len > tl {
@@ -287,11 +272,7 @@ impl RawLog {
     /// pad region are already zeroed from construction or `clean_partition`.
     ///
     /// No-op if `term_offset >= term_length` or `remaining < DATA_HEADER_LENGTH`.
-    pub fn write_pad_frame(
-        &mut self,
-        partition_idx: usize,
-        term_offset: u32,
-    ) {
+    pub fn write_pad_frame(&mut self, partition_idx: usize, term_offset: u32) {
         if partition_idx >= PARTITION_COUNT {
             return;
         }
@@ -670,7 +651,10 @@ mod tests {
         // Verify the header was written by parsing it back.
         let part = log.partition(0).unwrap();
         let parsed = DataHeader::parse(part).unwrap();
-        assert_eq!({ parsed.frame_header.frame_length }, DATA_HEADER_LENGTH as i32);
+        assert_eq!(
+            { parsed.frame_header.frame_length },
+            DATA_HEADER_LENGTH as i32
+        );
         assert_eq!({ parsed.session_id }, 42);
         assert_eq!({ parsed.stream_id }, 7);
     }
@@ -782,11 +766,7 @@ mod tests {
 
         // Frame 2: header + 4 bytes payload (36 bytes, aligned 64)
         let payload2 = [1, 2, 3, 4];
-        let hdr2 = make_data_header(
-            DATA_HEADER_LENGTH as i32 + 4,
-            off1 as i32,
-            2, 1, 0,
-        );
+        let hdr2 = make_data_header(DATA_HEADER_LENGTH as i32 + 4, off1 as i32, 2, 1, 0);
         let off2 = log.append_frame(0, off1, &hdr2, &payload2).unwrap();
         assert_eq!(off2, 96); // 32 + 64
 
@@ -1096,11 +1076,13 @@ mod tests {
     fn free_partition_index_matches_raw_log() {
         assert_eq!(partition_index(0, 0), RawLog::partition_index(0, 0));
         assert_eq!(partition_index(5, 0), RawLog::partition_index(5, 0));
-        assert_eq!(partition_index(i32::MAX, 0), RawLog::partition_index(i32::MAX, 0));
+        assert_eq!(
+            partition_index(i32::MAX, 0),
+            RawLog::partition_index(i32::MAX, 0)
+        );
         assert_eq!(
             partition_index(i32::MIN, i32::MAX),
             RawLog::partition_index(i32::MIN, i32::MAX)
         );
     }
 }
-

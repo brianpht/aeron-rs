@@ -10,11 +10,11 @@ mod agent_duty_cycle {
     use std::net::SocketAddr;
 
     use aeron_rs::agent::Agent;
+    use aeron_rs::agent::idle_strategy::IdleStrategy;
     use aeron_rs::agent::receiver::ReceiverAgent;
+    use aeron_rs::agent::runner::AgentRunner;
     use aeron_rs::agent::sender::SenderAgent;
     use aeron_rs::context::DriverContext;
-    use aeron_rs::agent::runner::AgentRunner;
-    use aeron_rs::agent::idle_strategy::IdleStrategy;
     use aeron_rs::media::channel::UdpChannel;
     use aeron_rs::media::receive_channel_endpoint::ReceiveChannelEndpoint;
     use aeron_rs::media::send_channel_endpoint::SendChannelEndpoint;
@@ -50,9 +50,8 @@ mod agent_duty_cycle {
         let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let remote_addr = channel.remote_data;
 
-        let transport =
-            UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
-                .expect("transport open");
+        let transport = UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
+            .expect("transport open");
 
         let endpoint = SendChannelEndpoint::new(channel, transport);
         let mut agent = SenderAgent::new(&ctx).expect("sender agent");
@@ -77,9 +76,8 @@ mod agent_duty_cycle {
         let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let remote_addr = channel.remote_data;
 
-        let transport =
-            UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
-                .expect("transport open");
+        let transport = UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
+            .expect("transport open");
 
         let endpoint = SendChannelEndpoint::new(channel, transport);
         let mut agent = SenderAgent::new(&ctx).expect("sender agent");
@@ -125,7 +123,11 @@ mod agent_duty_cycle {
         // term_length not power-of-two -> None.
         assert!(agent.add_publication(0, 1001, 10, 0, 100, 1408).is_none());
         // mtu too small -> None.
-        assert!(agent.add_publication(0, 1001, 10, 0, 1u32 << 16, 0).is_none());
+        assert!(
+            agent
+                .add_publication(0, 1001, 10, 0, 1u32 << 16, 0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -153,9 +155,8 @@ mod agent_duty_cycle {
         let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let remote_addr = channel.remote_data;
 
-        let transport =
-            UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
-                .expect("transport open");
+        let transport = UdpChannelTransport::open(&channel, &local_addr, &remote_addr, &ctx)
+            .expect("transport open");
 
         let endpoint = ReceiveChannelEndpoint::new(channel, transport, 0);
         let mut agent = ReceiverAgent::new(&ctx).expect("receiver agent");
@@ -235,4 +236,3 @@ mod agent_duty_cycle {
         assert!(result.is_ok());
     }
 }
-

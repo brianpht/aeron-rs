@@ -14,18 +14,18 @@
 
 use std::sync::Arc;
 
+use crate::agent::AgentError;
 use crate::agent::conductor::ConductorAgent;
 use crate::agent::receiver::ReceiverAgent;
 use crate::agent::sender::SenderAgent;
 use crate::agent::{AgentRunner, AgentRunnerHandle};
-use crate::agent::AgentError;
 use crate::cnc::cnc_file::DriverCnc;
 use crate::context::DriverContext;
 
+use super::ClientError;
 use super::aeron::Aeron;
 use super::bridge::PublicationBridge;
 use super::sub_bridge::{RecvEndpointBridge, SubscriptionBridge};
-use super::ClientError;
 
 /// Default CnC ring buffer capacities.
 const DEFAULT_TO_DRIVER_CAPACITY: usize = 64 * 1024;
@@ -74,15 +74,9 @@ impl MediaDriver {
         })?;
 
         // Create CnC (anonymous mmap for in-process use).
-        let cnc = DriverCnc::create_anonymous(
-            DEFAULT_TO_DRIVER_CAPACITY,
-            DEFAULT_TO_CLIENTS_CAPACITY,
-        ).map_err(|e| {
-            AgentError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        let cnc =
+            DriverCnc::create_anonymous(DEFAULT_TO_DRIVER_CAPACITY, DEFAULT_TO_CLIENTS_CAPACITY)
+                .map_err(|e| AgentError::Io(std::io::Error::other(e.to_string())))?;
 
         // Save CnC location before moving into conductor.
         let cnc_base = cnc.base_ptr();
@@ -114,8 +108,8 @@ impl MediaDriver {
         let idle = ctx.idle_strategy();
 
         // Start agents on dedicated threads.
-        let conductor_handle = AgentRunner::new(conductor, idle.clone()).start();
-        let sender_handle = AgentRunner::new(sender, idle.clone()).start();
+        let conductor_handle = AgentRunner::new(conductor, idle).start();
+        let sender_handle = AgentRunner::new(sender, idle).start();
         let receiver_handle = AgentRunner::new(receiver, idle).start();
 
         // Save config for client transport creation.
@@ -179,4 +173,3 @@ impl MediaDriver {
         r1.and(r2).and(r3)
     }
 }
-

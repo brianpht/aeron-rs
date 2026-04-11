@@ -65,7 +65,9 @@ fn main() {
                 json = true;
                 i += 1;
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -80,8 +82,8 @@ fn main() {
         // Aggressive idle strategy so agents wake up quickly under load.
         idle_strategy_max_spins: 100,
         idle_strategy_max_yields: 50,
-        idle_strategy_min_park_ns: 100,       // 100 ns
-        idle_strategy_max_park_ns: 10_000,    // 10 us
+        idle_strategy_min_park_ns: 100,    // 100 ns
+        idle_strategy_max_park_ns: 10_000, // 10 us
         // Large send slot pool: each sender_scan frame consumes one slot.
         // Must exceed frames-per-term to avoid silent frame drops during scan.
         uring_send_slots: 1024,
@@ -135,9 +137,8 @@ fn main() {
                 Ok(_) => sent += 1,
                 Err(OfferError::AdminAction) => {
                     // Term rotation - retry once.
-                    match publication.offer(&payload) {
-                        Ok(_) => sent += 1,
-                        _ => {}
+                    if publication.offer(&payload).is_ok() {
+                        sent += 1;
                     }
                 }
                 Err(OfferError::BackPressured) => {

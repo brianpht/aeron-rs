@@ -16,14 +16,13 @@
 //
 // No Mutex. No SeqCst. Zero allocation in steady state.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use crate::frame::DATA_HEADER_LENGTH;
 use crate::media::term_buffer::{
-    AppendError, SharedLogBuffer, PARTITION_COUNT,
-    align_frame_length, atomic_frame_length_load, atomic_frame_length_store,
-    partition_index,
+    AppendError, PARTITION_COUNT, SharedLogBuffer, align_frame_length, atomic_frame_length_load,
+    atomic_frame_length_store, partition_index,
 };
 
 // ---- Shared inner state ----
@@ -221,8 +220,7 @@ impl ReceiverImage {
     /// overwriting unread data.
     #[inline]
     pub fn check_back_pressure(&self) -> bool {
-        let max_ahead =
-            self.inner.term_length as i64 * (PARTITION_COUNT as i64 - 1);
+        let max_ahead = self.inner.term_length as i64 * (PARTITION_COUNT as i64 - 1);
         let sub_pos = self.inner.subscriber_position.load(Ordering::Acquire);
         self.receiver_position_local.wrapping_sub(sub_pos) >= max_ahead
     }
@@ -296,11 +294,10 @@ impl SubscriberImage {
 
         let inner = &*self.inner;
 
-        let term_id = inner.initial_term_id.wrapping_add(
-            (self.subscriber_position_local >> inner.position_bits_to_shift) as i32,
-        );
-        let term_offset =
-            (self.subscriber_position_local & inner.term_length_mask as i64) as u32;
+        let term_id = inner
+            .initial_term_id
+            .wrapping_add((self.subscriber_position_local >> inner.position_bits_to_shift) as i32);
+        let term_offset = (self.subscriber_position_local & inner.term_length_mask as i64) as u32;
 
         let part_idx = partition_index(term_id, inner.initial_term_id);
 
@@ -350,12 +347,8 @@ impl SubscriberImage {
             // payload bytes written by the receiver (before their Release
             // store) are visible.
             if payload_len > 0 {
-                let payload = unsafe {
-                    std::slice::from_raw_parts(
-                        buf_ptr.add(payload_start),
-                        payload_len,
-                    )
-                };
+                let payload =
+                    unsafe { std::slice::from_raw_parts(buf_ptr.add(payload_start), payload_len) };
                 handler(payload, inner.session_id, inner.stream_id);
             } else {
                 handler(&[], inner.session_id, inner.stream_id);
@@ -469,16 +462,14 @@ mod tests {
 
     #[test]
     fn poll_returns_zero_when_empty() {
-        let (_, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
-            .unwrap();
+        let (_, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0).unwrap();
         let count = sub.poll_fragments(|_, _, _| panic!("should not be called"), 10);
         assert_eq!(count, 0);
     }
 
     #[test]
     fn append_and_poll_single_frame() {
-        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
-            .unwrap();
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0).unwrap();
 
         let payload = [0xDE, 0xAD, 0xBE, 0xEF];
         let frame_len = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
@@ -492,11 +483,14 @@ mod tests {
 
         // Poll should find the frame.
         let mut found_payload = Vec::new();
-        let count = sub.poll_fragments(|data, sid, stid| {
-            assert_eq!(sid, 42);
-            assert_eq!(stid, 7);
-            found_payload.extend_from_slice(data);
-        }, 10);
+        let count = sub.poll_fragments(
+            |data, sid, stid| {
+                assert_eq!(sid, 42);
+                assert_eq!(stid, 7);
+                found_payload.extend_from_slice(data);
+            },
+            10,
+        );
 
         assert_eq!(count, 1);
         assert_eq!(&found_payload, &payload);
@@ -504,8 +498,7 @@ mod tests {
 
     #[test]
     fn poll_advances_subscriber_position() {
-        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
-            .unwrap();
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0).unwrap();
 
         let payload = [0xAB; 8];
         let frame_len = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
@@ -525,8 +518,7 @@ mod tests {
 
     #[test]
     fn multiple_frames_polled_in_order() {
-        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
-            .unwrap();
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0).unwrap();
 
         let mut offset: u32 = 0;
         for i in 0..5u8 {
@@ -539,9 +531,12 @@ mod tests {
         recv.advance_receiver_position(offset as i64);
 
         let mut seen = Vec::new();
-        let count = sub.poll_fragments(|data, _, _| {
-            seen.push(data[0]);
-        }, 10);
+        let count = sub.poll_fragments(
+            |data, _, _| {
+                seen.push(data[0]);
+            },
+            10,
+        );
 
         assert_eq!(count, 5);
         assert_eq!(seen, vec![0, 1, 2, 3, 4]);
@@ -549,8 +544,7 @@ mod tests {
 
     #[test]
     fn poll_respects_limit() {
-        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0)
-            .unwrap();
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, TEST_TERM_LENGTH, 0).unwrap();
 
         let mut offset: u32 = 0;
         for i in 0..5u8 {
@@ -585,8 +579,7 @@ mod tests {
 
     #[test]
     fn close_signal_visible() {
-        let (recv, sub) = new_shared_image(1, 1, 0, 0, TEST_TERM_LENGTH, 0)
-            .unwrap();
+        let (recv, sub) = new_shared_image(1, 1, 0, 0, TEST_TERM_LENGTH, 0).unwrap();
         assert!(!sub.is_closed());
         recv.close();
         assert!(sub.is_closed());
@@ -597,8 +590,7 @@ mod tests {
         // Use a small term (256 bytes) so we can fill partition 0 quickly.
         // 256 / 32 = 8 header-only frames per partition.
         let tl: u32 = 256;
-        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0)
-            .expect("valid params");
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0).expect("valid params");
 
         // Fill partition 0 (term 0) completely with 8 header-only frames.
         let frames_per_term = (tl / FRAME_ALIGNMENT as u32) as usize;
@@ -607,7 +599,8 @@ mod tests {
             let payload = [i as u8; 0]; // header-only
             let frame_len = DATA_HEADER_LENGTH as i32;
             let hdr = make_data_header(frame_len, offset as i32, 42, 7, 0);
-            offset = recv.append_frame(0, offset, &hdr, &payload)
+            offset = recv
+                .append_frame(0, offset, &hdr, &payload)
                 .expect("append in term 0");
         }
         assert_eq!(offset, tl, "partition 0 should be exactly full");
@@ -623,7 +616,8 @@ mod tests {
             let payload = [0xA0 | i; 4];
             let frame_len = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
             let hdr = make_data_header(frame_len, t1_offset as i32, 42, 7, 1);
-            t1_offset = recv.append_frame(term1_pidx, t1_offset, &hdr, &payload)
+            t1_offset = recv
+                .append_frame(term1_pidx, t1_offset, &hdr, &payload)
                 .expect("append in term 1");
         }
 
@@ -633,18 +627,31 @@ mod tests {
 
         // Poll term 0 - should get all 8 frames.
         let mut term0_count = 0i32;
-        term0_count += sub.poll_fragments(|_, sid, stid| {
-            assert_eq!(sid, 42);
-            assert_eq!(stid, 7);
-        }, 100);
-        assert_eq!(term0_count, frames_per_term as i32, "should poll all term 0 frames");
-        assert_eq!(sub.position(), tl as i64, "position should be at term boundary");
+        term0_count += sub.poll_fragments(
+            |_, sid, stid| {
+                assert_eq!(sid, 42);
+                assert_eq!(stid, 7);
+            },
+            100,
+        );
+        assert_eq!(
+            term0_count, frames_per_term as i32,
+            "should poll all term 0 frames"
+        );
+        assert_eq!(
+            sub.position(),
+            tl as i64,
+            "position should be at term boundary"
+        );
 
         // Poll term 1 - subscriber should automatically rotate to partition 1.
         let mut term1_payloads = Vec::new();
-        let term1_count = sub.poll_fragments(|data, _, _| {
-            term1_payloads.push(data[0]);
-        }, 100);
+        let term1_count = sub.poll_fragments(
+            |data, _, _| {
+                term1_payloads.push(data[0]);
+            },
+            100,
+        );
         assert_eq!(term1_count, 3, "should poll 3 frames from term 1");
         assert_eq!(term1_payloads, vec![0xA0, 0xA1, 0xA2]);
         assert_eq!(
@@ -662,8 +669,7 @@ mod tests {
     fn term_rotation_multi_term_jump() {
         // Verify subscriber can jump across multiple terms (0 -> 1 -> 2).
         let tl: u32 = 128; // 128 / 32 = 4 frames per partition
-        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0)
-            .expect("valid params");
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0).expect("valid params");
 
         let frames_per_term = (tl / FRAME_ALIGNMENT as u32) as usize;
 
@@ -716,8 +722,8 @@ mod tests {
         // Verify partition_index math works with initial_term_id != 0.
         let tl: u32 = 128;
         let initial_term_id = 100;
-        let (mut recv, mut sub) = new_shared_image(42, 7, initial_term_id, initial_term_id, tl, 0)
-            .expect("valid params");
+        let (mut recv, mut sub) =
+            new_shared_image(42, 7, initial_term_id, initial_term_id, tl, 0).expect("valid params");
 
         let frames_per_term = (tl / FRAME_ALIGNMENT as u32) as usize;
 
@@ -729,7 +735,11 @@ mod tests {
         let mut offset: u32 = 0;
         for _ in 0..frames_per_term {
             let hdr = make_data_header(
-                DATA_HEADER_LENGTH as i32, offset as i32, 42, 7, initial_term_id,
+                DATA_HEADER_LENGTH as i32,
+                offset as i32,
+                42,
+                7,
+                initial_term_id,
             );
             offset = recv.append_frame(p0, offset, &hdr, &[]).expect("p0");
         }
@@ -740,9 +750,7 @@ mod tests {
         recv.clean_partition(p1);
         let payload = [0xFF; 4];
         let frame_len = DATA_HEADER_LENGTH as i32 + 4;
-        let hdr = make_data_header(
-            frame_len, 0, 42, 7, initial_term_id + 1,
-        );
+        let hdr = make_data_header(frame_len, 0, 42, 7, initial_term_id + 1);
         let t1_end = recv.append_frame(p1, 0, &hdr, &payload).expect("p1");
 
         let total_pos = tl as i64 + t1_end as i64;
@@ -754,9 +762,12 @@ mod tests {
 
         // Poll term 101 - should get 1 frame with correct payload.
         let mut got_payload = Vec::new();
-        let c1 = sub.poll_fragments(|data, _, _| {
-            got_payload.extend_from_slice(data);
-        }, 100);
+        let c1 = sub.poll_fragments(
+            |data, _, _| {
+                got_payload.extend_from_slice(data);
+            },
+            100,
+        );
         assert_eq!(c1, 1);
         assert_eq!(&got_payload, &[0xFF; 4]);
     }
@@ -766,8 +777,7 @@ mod tests {
         // 20 frames * 64 bytes each = 1280 bytes; need term_length >= 1280.
         // Use 2048 (next power-of-two) so all frames fit in one partition.
         let cross_term_length: u32 = 2048;
-        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, cross_term_length, 0)
-            .unwrap();
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, cross_term_length, 0).unwrap();
 
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done_clone = done.clone();
@@ -804,4 +814,3 @@ mod tests {
         assert_eq!(total, 20);
     }
 }
-

@@ -46,10 +46,7 @@ pub enum SenderCommand {
 #[derive(Clone, Copy)]
 pub enum ReceiverCommand {
     /// Add a subscription (endpoint + stream).
-    AddSubscription {
-        correlation_id: i64,
-        stream_id: i32,
-    },
+    AddSubscription { correlation_id: i64, stream_id: i32 },
     /// Remove a subscription.
     RemoveSubscription {
         correlation_id: i64,
@@ -68,8 +65,12 @@ const INTERNAL_CMD_REMOVE_SUB: i32 = 2;
 fn encode_sender_cmd(cmd: &SenderCommand, buf: &mut [u8; 64]) -> (i32, usize) {
     match cmd {
         SenderCommand::AddPublication {
-            correlation_id, stream_id, session_id,
-            initial_term_id, term_length, mtu,
+            correlation_id,
+            stream_id,
+            session_id,
+            initial_term_id,
+            term_length,
+            mtu,
         } => {
             buf[0..8].copy_from_slice(&correlation_id.to_le_bytes());
             buf[8..12].copy_from_slice(&stream_id.to_le_bytes());
@@ -79,7 +80,10 @@ fn encode_sender_cmd(cmd: &SenderCommand, buf: &mut [u8; 64]) -> (i32, usize) {
             buf[24..28].copy_from_slice(&mtu.to_le_bytes());
             (INTERNAL_CMD_ADD_PUB, 28)
         }
-        SenderCommand::RemovePublication { correlation_id, registration_id } => {
+        SenderCommand::RemovePublication {
+            correlation_id,
+            registration_id,
+        } => {
             buf[0..8].copy_from_slice(&correlation_id.to_le_bytes());
             buf[8..16].copy_from_slice(&registration_id.to_le_bytes());
             (INTERNAL_CMD_REMOVE_PUB, 16)
@@ -90,22 +94,18 @@ fn encode_sender_cmd(cmd: &SenderCommand, buf: &mut [u8; 64]) -> (i32, usize) {
 /// Decode a SenderCommand from the internal queue.
 fn decode_sender_cmd(msg_type: i32, data: &[u8]) -> Option<SenderCommand> {
     match msg_type {
-        INTERNAL_CMD_ADD_PUB if data.len() >= 28 => {
-            Some(SenderCommand::AddPublication {
-                correlation_id: i64::from_le_bytes(data[0..8].try_into().ok()?),
-                stream_id: i32::from_le_bytes(data[8..12].try_into().ok()?),
-                session_id: i32::from_le_bytes(data[12..16].try_into().ok()?),
-                initial_term_id: i32::from_le_bytes(data[16..20].try_into().ok()?),
-                term_length: u32::from_le_bytes(data[20..24].try_into().ok()?),
-                mtu: u32::from_le_bytes(data[24..28].try_into().ok()?),
-            })
-        }
-        INTERNAL_CMD_REMOVE_PUB if data.len() >= 16 => {
-            Some(SenderCommand::RemovePublication {
-                correlation_id: i64::from_le_bytes(data[0..8].try_into().ok()?),
-                registration_id: i64::from_le_bytes(data[8..16].try_into().ok()?),
-            })
-        }
+        INTERNAL_CMD_ADD_PUB if data.len() >= 28 => Some(SenderCommand::AddPublication {
+            correlation_id: i64::from_le_bytes(data[0..8].try_into().ok()?),
+            stream_id: i32::from_le_bytes(data[8..12].try_into().ok()?),
+            session_id: i32::from_le_bytes(data[12..16].try_into().ok()?),
+            initial_term_id: i32::from_le_bytes(data[16..20].try_into().ok()?),
+            term_length: u32::from_le_bytes(data[20..24].try_into().ok()?),
+            mtu: u32::from_le_bytes(data[24..28].try_into().ok()?),
+        }),
+        INTERNAL_CMD_REMOVE_PUB if data.len() >= 16 => Some(SenderCommand::RemovePublication {
+            correlation_id: i64::from_le_bytes(data[0..8].try_into().ok()?),
+            registration_id: i64::from_le_bytes(data[8..16].try_into().ok()?),
+        }),
         _ => None,
     }
 }
@@ -113,12 +113,18 @@ fn decode_sender_cmd(msg_type: i32, data: &[u8]) -> Option<SenderCommand> {
 /// Encode a ReceiverCommand into bytes for the internal queue.
 fn encode_receiver_cmd(cmd: &ReceiverCommand, buf: &mut [u8; 64]) -> (i32, usize) {
     match cmd {
-        ReceiverCommand::AddSubscription { correlation_id, stream_id } => {
+        ReceiverCommand::AddSubscription {
+            correlation_id,
+            stream_id,
+        } => {
             buf[0..8].copy_from_slice(&correlation_id.to_le_bytes());
             buf[8..12].copy_from_slice(&stream_id.to_le_bytes());
             (INTERNAL_CMD_ADD_SUB, 12)
         }
-        ReceiverCommand::RemoveSubscription { correlation_id, registration_id } => {
+        ReceiverCommand::RemoveSubscription {
+            correlation_id,
+            registration_id,
+        } => {
             buf[0..8].copy_from_slice(&correlation_id.to_le_bytes());
             buf[8..16].copy_from_slice(&registration_id.to_le_bytes());
             (INTERNAL_CMD_REMOVE_SUB, 16)
@@ -129,18 +135,14 @@ fn encode_receiver_cmd(cmd: &ReceiverCommand, buf: &mut [u8; 64]) -> (i32, usize
 /// Decode a ReceiverCommand from the internal queue.
 fn decode_receiver_cmd(msg_type: i32, data: &[u8]) -> Option<ReceiverCommand> {
     match msg_type {
-        INTERNAL_CMD_ADD_SUB if data.len() >= 12 => {
-            Some(ReceiverCommand::AddSubscription {
-                correlation_id: i64::from_le_bytes(data[0..8].try_into().ok()?),
-                stream_id: i32::from_le_bytes(data[8..12].try_into().ok()?),
-            })
-        }
-        INTERNAL_CMD_REMOVE_SUB if data.len() >= 16 => {
-            Some(ReceiverCommand::RemoveSubscription {
-                correlation_id: i64::from_le_bytes(data[0..8].try_into().ok()?),
-                registration_id: i64::from_le_bytes(data[8..16].try_into().ok()?),
-            })
-        }
+        INTERNAL_CMD_ADD_SUB if data.len() >= 12 => Some(ReceiverCommand::AddSubscription {
+            correlation_id: i64::from_le_bytes(data[0..8].try_into().ok()?),
+            stream_id: i32::from_le_bytes(data[8..12].try_into().ok()?),
+        }),
+        INTERNAL_CMD_REMOVE_SUB if data.len() >= 16 => Some(ReceiverCommand::RemoveSubscription {
+            correlation_id: i64::from_le_bytes(data[0..8].try_into().ok()?),
+            registration_id: i64::from_le_bytes(data[8..16].try_into().ok()?),
+        }),
         _ => None,
     }
 }
@@ -154,21 +156,11 @@ const INTERNAL_QUEUE_CAPACITY: usize = 4096;
 const MAX_CLIENTS: usize = 64;
 
 /// Per-client liveness state.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct ClientEntry {
     client_id: i64,
     last_keepalive_ns: i64,
     active: bool,
-}
-
-impl Default for ClientEntry {
-    fn default() -> Self {
-        Self {
-            client_id: 0,
-            last_keepalive_ns: 0,
-            active: false,
-        }
-    }
 }
 
 /// The conductor agent. Reads commands from the CnC to-driver ring buffer,
@@ -218,37 +210,45 @@ impl ConductorAgent {
         let mut to_sender_buf = vec![0u8; to_sender_size];
         let mut to_receiver_buf = vec![0u8; to_receiver_size];
 
-        let to_sender = unsafe {
-            MpscRingBuffer::new(to_sender_buf.as_mut_ptr(), INTERNAL_QUEUE_CAPACITY)
-        }.map_err(|_| AgentError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "failed to create sender command queue",
-        )))?;
+        let to_sender =
+            unsafe { MpscRingBuffer::new(to_sender_buf.as_mut_ptr(), INTERNAL_QUEUE_CAPACITY) }
+                .map_err(|_| {
+                    AgentError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "failed to create sender command queue",
+                    ))
+                })?;
 
-        let to_receiver = unsafe {
-            MpscRingBuffer::new(to_receiver_buf.as_mut_ptr(), INTERNAL_QUEUE_CAPACITY)
-        }.map_err(|_| AgentError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "failed to create receiver command queue",
-        )))?;
+        let to_receiver =
+            unsafe { MpscRingBuffer::new(to_receiver_buf.as_mut_ptr(), INTERNAL_QUEUE_CAPACITY) }
+                .map_err(|_| {
+                AgentError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "failed to create receiver command queue",
+                ))
+            })?;
 
         // Create read handles for the sender and receiver agents.
         let sender_queue = SenderCommandQueue {
-            rb: unsafe {
-                MpscRingBuffer::new(to_sender_buf.as_mut_ptr(), INTERNAL_QUEUE_CAPACITY)
-            }.map_err(|_| AgentError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "failed to create sender queue reader",
-            )))?,
+            rb: unsafe { MpscRingBuffer::new(to_sender_buf.as_mut_ptr(), INTERNAL_QUEUE_CAPACITY) }
+                .map_err(|_| {
+                    AgentError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "failed to create sender queue reader",
+                    ))
+                })?,
         };
 
         let receiver_queue = ReceiverCommandQueue {
             rb: unsafe {
                 MpscRingBuffer::new(to_receiver_buf.as_mut_ptr(), INTERNAL_QUEUE_CAPACITY)
-            }.map_err(|_| AgentError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "failed to create receiver queue reader",
-            )))?,
+            }
+            .map_err(|_| {
+                AgentError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "failed to create receiver queue reader",
+                ))
+            })?,
         };
 
         let conductor = Self {
@@ -371,7 +371,10 @@ impl ConductorAgent {
             channel_status_indicator_id: 0,
         };
         if let Some(len) = rsp.encode(&mut self.scratch) {
-            let _ = self.cnc.to_clients().transmit(RSP_PUBLICATION_READY, &self.scratch[..len]);
+            let _ = self
+                .cnc
+                .to_clients()
+                .transmit(RSP_PUBLICATION_READY, &self.scratch[..len]);
         }
     }
 
@@ -403,7 +406,10 @@ impl ConductorAgent {
             channel_status_indicator_id: 0,
         };
         if let Some(len) = rsp.encode(&mut self.scratch) {
-            let _ = self.cnc.to_clients().transmit(RSP_SUBSCRIPTION_READY, &self.scratch[..len]);
+            let _ = self
+                .cnc
+                .to_clients()
+                .transmit(RSP_SUBSCRIPTION_READY, &self.scratch[..len]);
         }
     }
 
@@ -447,8 +453,8 @@ impl Agent for ConductorAgent {
         work_count += msgs;
 
         // Process collected commands.
-        for i in 0..cmd_count {
-            let (msg_type, ref payload, len) = cmd_buf[i];
+        for item in cmd_buf.iter().take(cmd_count) {
+            let (msg_type, ref payload, len) = *item;
             self.process_command(msg_type, &payload[..len], now_ns);
         }
 
@@ -517,8 +523,7 @@ mod tests {
     const TO_CLIENTS: usize = 4096;
 
     fn make_conductor() -> (ConductorAgent, SenderCommandQueue, ReceiverCommandQueue) {
-        let cnc = DriverCnc::create_anonymous(TO_DRIVER, TO_CLIENTS)
-            .expect("create CnC");
+        let cnc = DriverCnc::create_anonymous(TO_DRIVER, TO_CLIENTS).expect("create CnC");
         ConductorAgent::new(cnc, 10_000_000_000).expect("create conductor")
     }
 
@@ -540,12 +545,15 @@ mod tests {
         let (mut conductor, sender_queue, _) = make_conductor();
 
         // Simulate a client writing an AddPublication command.
-        let cmd = AddPublication::from_channel(
-            1, 100, 10, "aeron:udp?endpoint=127.0.0.1:40123",
-        ).expect("cmd");
+        let cmd = AddPublication::from_channel(1, 100, 10, "aeron:udp?endpoint=127.0.0.1:40123")
+            .expect("cmd");
         let mut buf = [0u8; ADD_PUBLICATION_LENGTH];
         cmd.encode(&mut buf).expect("encode");
-        conductor.cnc.to_driver().write(CMD_ADD_PUBLICATION, &buf).expect("write");
+        conductor
+            .cnc
+            .to_driver()
+            .write(CMD_ADD_PUBLICATION, &buf)
+            .expect("write");
 
         // Run the conductor duty cycle.
         let work = conductor.do_work().expect("do_work");
@@ -553,14 +561,12 @@ mod tests {
 
         // Check that the sender got a command.
         let mut received = false;
-        sender_queue.poll(|cmd| {
-            match cmd {
-                SenderCommand::AddPublication { stream_id, .. } => {
-                    assert_eq!(stream_id, 10);
-                    received = true;
-                }
-                _ => panic!("unexpected command"),
+        sender_queue.poll(|cmd| match cmd {
+            SenderCommand::AddPublication { stream_id, .. } => {
+                assert_eq!(stream_id, 10);
+                received = true;
             }
+            _ => panic!("unexpected command"),
         });
         assert!(received, "sender should have received AddPublication");
     }
@@ -569,25 +575,26 @@ mod tests {
     fn conductor_processes_add_subscription() {
         let (mut conductor, _, receiver_queue) = make_conductor();
 
-        let cmd = AddSubscription::from_channel(
-            2, 200, 20, "aeron:udp?endpoint=127.0.0.1:40124",
-        ).expect("cmd");
+        let cmd = AddSubscription::from_channel(2, 200, 20, "aeron:udp?endpoint=127.0.0.1:40124")
+            .expect("cmd");
         let mut buf = [0u8; ADD_SUBSCRIPTION_LENGTH];
         cmd.encode(&mut buf).expect("encode");
-        conductor.cnc.to_driver().write(CMD_ADD_SUBSCRIPTION, &buf).expect("write");
+        conductor
+            .cnc
+            .to_driver()
+            .write(CMD_ADD_SUBSCRIPTION, &buf)
+            .expect("write");
 
         let work = conductor.do_work().expect("do_work");
         assert!(work > 0);
 
         let mut received = false;
-        receiver_queue.poll(|cmd| {
-            match cmd {
-                ReceiverCommand::AddSubscription { stream_id, .. } => {
-                    assert_eq!(stream_id, 20);
-                    received = true;
-                }
-                _ => panic!("unexpected command"),
+        receiver_queue.poll(|cmd| match cmd {
+            ReceiverCommand::AddSubscription { stream_id, .. } => {
+                assert_eq!(stream_id, 20);
+                received = true;
             }
+            _ => panic!("unexpected command"),
         });
         assert!(received, "receiver should have received AddSubscription");
     }
@@ -602,15 +609,18 @@ mod tests {
                 conductor.cnc.base_ptr(),
                 conductor.cnc.length(),
             )
-        }.expect("client");
+        }
+        .expect("client");
 
         // Write AddPublication command.
-        let cmd = AddPublication::from_channel(
-            42, 100, 10, "aeron:udp?endpoint=127.0.0.1:40123",
-        ).expect("cmd");
+        let cmd = AddPublication::from_channel(42, 100, 10, "aeron:udp?endpoint=127.0.0.1:40123")
+            .expect("cmd");
         let mut buf = [0u8; ADD_PUBLICATION_LENGTH];
         cmd.encode(&mut buf).expect("encode");
-        client.to_driver().write(CMD_ADD_PUBLICATION, &buf).expect("write");
+        client
+            .to_driver()
+            .write(CMD_ADD_PUBLICATION, &buf)
+            .expect("write");
 
         // Run conductor.
         conductor.do_work().expect("do_work");
@@ -638,7 +648,11 @@ mod tests {
         };
         let mut buf = [0u8; CLIENT_KEEPALIVE_LENGTH];
         cmd.encode(&mut buf).expect("encode");
-        conductor.cnc.to_driver().write(CMD_CLIENT_KEEPALIVE, &buf).expect("write");
+        conductor
+            .cnc
+            .to_driver()
+            .write(CMD_CLIENT_KEEPALIVE, &buf)
+            .expect("write");
 
         let work = conductor.do_work().expect("do_work");
         assert!(work > 0);
@@ -663,7 +677,11 @@ mod tests {
         let (msg_type, len) = encode_sender_cmd(&cmd, &mut buf);
         let decoded = decode_sender_cmd(msg_type, &buf[..len]).expect("decode");
         match decoded {
-            SenderCommand::AddPublication { stream_id, session_id, .. } => {
+            SenderCommand::AddPublication {
+                stream_id,
+                session_id,
+                ..
+            } => {
                 assert_eq!(stream_id, 10);
                 assert_eq!(session_id, 42);
             }
@@ -688,4 +706,3 @@ mod tests {
         }
     }
 }
-

@@ -1,8 +1,8 @@
-pub mod sender;
-pub mod receiver;
 pub mod conductor;
 pub mod idle_strategy;
+pub mod receiver;
 pub mod runner;
+pub mod sender;
 
 pub use idle_strategy::{IdleStrategy, IdleStrategyState};
 pub use runner::{AgentRunner, AgentRunnerHandle};
@@ -82,4 +82,3 @@ mod tests {
         assert_eq!(agent.name(), "stub-agent");
     }
 }
-

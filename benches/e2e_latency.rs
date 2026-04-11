@@ -23,9 +23,9 @@ use std::hint::black_box;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use aeron_rs::agent::Agent;
 use aeron_rs::agent::receiver::ReceiverAgent;
 use aeron_rs::agent::sender::SenderAgent;
-use aeron_rs::agent::Agent;
 use aeron_rs::context::DriverContext;
 use aeron_rs::frame::DATA_HEADER_LENGTH;
 use aeron_rs::media::channel::UdpChannel;
@@ -92,13 +92,12 @@ fn setup_agents() -> (SenderAgent, ReceiverAgent, usize) {
     let ctx = make_bench_ctx();
 
     // -- Receiver side: bind to ephemeral port --
-    let recv_channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0")
-        .expect("parse recv channel");
+    let recv_channel =
+        UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:0").expect("parse recv channel");
     let local: SocketAddr = "127.0.0.1:0".parse().expect("parse local addr");
     let remote = recv_channel.remote_data;
-    let recv_transport =
-        UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
-            .expect("open recv transport");
+    let recv_transport = UdpChannelTransport::open(&recv_channel, &local, &remote, &ctx)
+        .expect("open recv transport");
     let recv_port = recv_transport.bound_addr.port();
 
     let recv_ep = ReceiveChannelEndpoint::new(recv_channel, recv_transport, 0);
@@ -109,9 +108,8 @@ fn setup_agents() -> (SenderAgent, ReceiverAgent, usize) {
     let send_uri = format!("aeron:udp?endpoint=127.0.0.1:{recv_port}");
     let send_channel = UdpChannel::parse(&send_uri).expect("parse send channel");
     let send_remote = send_channel.remote_data;
-    let mut send_transport =
-        UdpChannelTransport::open(&send_channel, &local, &send_remote, &ctx)
-            .expect("open send transport");
+    let mut send_transport = UdpChannelTransport::open(&send_channel, &local, &send_remote, &ctx)
+        .expect("open send transport");
     // Connect the socket so sendmsg works without a per-frame dest_addr.
     send_transport
         .connect(&send_remote)
@@ -121,7 +119,14 @@ fn setup_agents() -> (SenderAgent, ReceiverAgent, usize) {
     let mut sender = SenderAgent::new(&ctx).expect("sender agent");
     sender.add_endpoint(send_ep).expect("add send endpoint");
     let pub_idx = sender
-        .add_publication(0, SESSION_ID, STREAM_ID, INITIAL_TERM_ID, BENCH_TERM_LENGTH, BENCH_MTU)
+        .add_publication(
+            0,
+            SESSION_ID,
+            STREAM_ID,
+            INITIAL_TERM_ID,
+            BENCH_TERM_LENGTH,
+            BENCH_MTU,
+        )
         .expect("add publication");
 
     // -- Warmup: spin both agents until Setup/SM handshake completes --
@@ -225,12 +230,7 @@ fn bench_e2e_latency(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                run_one_rtt(
-                    &mut sender,
-                    &mut receiver,
-                    pub_idx,
-                    &payload,
-                );
+                run_one_rtt(&mut sender, &mut receiver, pub_idx, &payload);
             }
             start.elapsed()
         });
@@ -257,12 +257,7 @@ fn bench_e2e_latency_batch(c: &mut Criterion) {
             let total_rtts = iters * BATCH_SIZE;
             let start = Instant::now();
             for _ in 0..total_rtts {
-                run_one_rtt(
-                    &mut sender,
-                    &mut receiver,
-                    pub_idx,
-                    &payload,
-                );
+                run_one_rtt(&mut sender, &mut receiver, pub_idx, &payload);
             }
             start.elapsed()
         });
@@ -288,12 +283,7 @@ fn bench_e2e_latency_minimal(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                run_one_rtt(
-                    &mut sender,
-                    &mut receiver,
-                    pub_idx,
-                    &payload,
-                );
+                run_one_rtt(&mut sender, &mut receiver, pub_idx, &payload);
             }
             start.elapsed()
         });
@@ -321,12 +311,7 @@ fn bench_e2e_latency_small(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                run_one_rtt(
-                    &mut sender,
-                    &mut receiver,
-                    pub_idx,
-                    &payload,
-                );
+                run_one_rtt(&mut sender, &mut receiver, pub_idx, &payload);
             }
             start.elapsed()
         });
@@ -343,4 +328,3 @@ criterion_group!(
     bench_e2e_latency_small,
 );
 criterion_main!(benches);
-

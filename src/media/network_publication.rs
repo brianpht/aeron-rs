@@ -13,10 +13,10 @@
 use std::fmt;
 
 use crate::frame::{
-    DataHeader, FrameHeader, CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END,
-    DATA_HEADER_LENGTH, FRAME_TYPE_DATA,
+    CURRENT_VERSION, DATA_FLAG_BEGIN, DATA_FLAG_END, DATA_HEADER_LENGTH, DataHeader,
+    FRAME_TYPE_DATA, FrameHeader,
 };
-use crate::media::term_buffer::{AppendError, RawLog, PARTITION_COUNT};
+use crate::media::term_buffer::{AppendError, PARTITION_COUNT, RawLog};
 
 // ---- Error type ----
 
@@ -150,8 +150,7 @@ impl NetworkPublication {
             return Err(OfferError::BackPressured);
         }
 
-        let partition_idx =
-            RawLog::partition_index(self.active_term_id, self.initial_term_id);
+        let partition_idx = RawLog::partition_index(self.active_term_id, self.initial_term_id);
 
         let frame_length = DATA_HEADER_LENGTH as i32 + payload.len() as i32;
 
@@ -169,17 +168,20 @@ impl NetworkPublication {
             reserved_value: 0,
         };
 
-        match self.raw_log.append_frame(partition_idx, self.term_offset, &hdr, payload) {
+        match self
+            .raw_log
+            .append_frame(partition_idx, self.term_offset, &hdr, payload)
+        {
             Ok(new_offset) => {
                 self.term_offset = new_offset;
-                self.pub_position =
-                    self.compute_position(self.active_term_id, new_offset);
+                self.pub_position = self.compute_position(self.active_term_id, new_offset);
                 Ok(self.pub_position)
             }
             Err(AppendError::TermFull) => {
                 // Write a pad frame at the unused tail so sender_scan can
                 // advance past it instead of getting stuck on zeros.
-                self.raw_log.write_pad_frame(partition_idx, self.term_offset);
+                self.raw_log
+                    .write_pad_frame(partition_idx, self.term_offset);
                 self.rotate_term();
                 Err(OfferError::AdminAction)
             }
@@ -202,11 +204,10 @@ impl NetworkPublication {
     where
         F: FnMut(u32, &[u8]),
     {
-        let term_id = self.initial_term_id.wrapping_add(
-            (self.sender_position >> self.position_bits_to_shift) as i32,
-        );
-        let term_offset =
-            (self.sender_position & self.term_length_mask as i64) as u32;
+        let term_id = self
+            .initial_term_id
+            .wrapping_add((self.sender_position >> self.position_bits_to_shift) as i32);
+        let term_offset = (self.sender_position & self.term_length_mask as i64) as u32;
 
         let partition_idx = RawLog::partition_index(term_id, self.initial_term_id);
 
@@ -218,9 +219,9 @@ impl NetworkPublication {
             remaining_in_term
         };
 
-        let scanned =
-            self.raw_log
-                .scan_frames(partition_idx, term_offset, effective_limit, emit);
+        let scanned = self
+            .raw_log
+            .scan_frames(partition_idx, term_offset, effective_limit, emit);
 
         self.sender_position += scanned as i64;
 
@@ -247,8 +248,7 @@ impl NetworkPublication {
         // partition was last used 4 terms ago. Back-pressure ensures the
         // sender is at most 3 terms behind, so it has finished scanning
         // the previous contents.
-        let new_partition_idx =
-            RawLog::partition_index(self.active_term_id, self.initial_term_id);
+        let new_partition_idx = RawLog::partition_index(self.active_term_id, self.initial_term_id);
         self.raw_log.clean_partition(new_partition_idx);
     }
 
@@ -337,8 +337,7 @@ mod tests {
     const TEST_MTU: u32 = 1408;
 
     fn make_pub() -> NetworkPublication {
-        NetworkPublication::new(42, 7, 0, TEST_TERM_LENGTH, TEST_MTU)
-            .expect("valid params")
+        NetworkPublication::new(42, 7, 0, TEST_TERM_LENGTH, TEST_MTU).expect("valid params")
     }
 
     fn make_pub_with(
@@ -395,8 +394,7 @@ mod tests {
         assert!(NetworkPublication::new(1, 1, 0, TEST_TERM_LENGTH, 31).is_none());
         // Exactly DATA_HEADER_LENGTH is valid (zero payload allowed).
         assert!(
-            NetworkPublication::new(1, 1, 0, TEST_TERM_LENGTH, DATA_HEADER_LENGTH as u32)
-                .is_some()
+            NetworkPublication::new(1, 1, 0, TEST_TERM_LENGTH, DATA_HEADER_LENGTH as u32).is_some()
         );
     }
 
@@ -453,18 +451,18 @@ mod tests {
         let mut p = make_pub_with(1, 1, 0, 64, TEST_MTU);
 
         // Term 0: 2 header-only frames fill 64 bytes, then AdminAction.
-        assert!(p.offer(&[]).is_ok());    // pub_pos = 32
-        assert!(p.offer(&[]).is_ok());    // pub_pos = 64
+        assert!(p.offer(&[]).is_ok()); // pub_pos = 32
+        assert!(p.offer(&[]).is_ok()); // pub_pos = 64
         assert_eq!(p.offer(&[]), Err(OfferError::AdminAction));
 
         // Term 1: 2 frames.
-        assert!(p.offer(&[]).is_ok());    // pub_pos = 96
-        assert!(p.offer(&[]).is_ok());    // pub_pos = 128
+        assert!(p.offer(&[]).is_ok()); // pub_pos = 96
+        assert!(p.offer(&[]).is_ok()); // pub_pos = 128
         assert_eq!(p.offer(&[]), Err(OfferError::AdminAction));
 
         // Term 2: 2 frames fill to pub_pos = 192 = max_ahead.
-        assert!(p.offer(&[]).is_ok());    // pub_pos = 160
-        assert!(p.offer(&[]).is_ok());    // pub_pos = 192
+        assert!(p.offer(&[]).is_ok()); // pub_pos = 160
+        assert!(p.offer(&[]).is_ok()); // pub_pos = 192
 
         // Next offer hits back-pressure check (192 - 0 >= 192) before
         // append_frame can even try. No AdminAction, just BackPressured.
@@ -586,8 +584,8 @@ mod tests {
     #[test]
     fn sender_scan_advances_sender_position() {
         let mut p = make_pub();
-        p.offer(&[]).unwrap();  // 32 bytes
-        p.offer(&[]).unwrap();  // 32 bytes -> total 64
+        p.offer(&[]).unwrap(); // 32 bytes
+        p.offer(&[]).unwrap(); // 32 bytes -> total 64
 
         let scanned = p.sender_scan(TEST_TERM_LENGTH, |_, _| {});
         assert_eq!(scanned, 64);
@@ -730,7 +728,10 @@ mod tests {
 
         // Partition 0 should have data.
         let part0 = p.raw_log().partition(0).unwrap();
-        assert!(!part0.iter().all(|&b| b == 0), "partition 0 should have data");
+        assert!(
+            !part0.iter().all(|&b| b == 0),
+            "partition 0 should have data"
+        );
 
         // Rotate to term_id=1 (partition 1).
         assert_eq!(p.offer(&[]), Err(OfferError::AdminAction));
@@ -793,4 +794,3 @@ mod tests {
         assert_eq!(log.capacity(), TEST_TERM_LENGTH as usize * PARTITION_COUNT);
     }
 }
-

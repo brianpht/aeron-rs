@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use super::{Agent, AgentError};
-use crate::clock::CachedNanoClock;
 use crate::client::bridge::PublicationBridge;
+use crate::clock::CachedNanoClock;
 
 use crate::context::DriverContext;
 use crate::media::concurrent_publication::{
@@ -15,7 +15,7 @@ use crate::media::network_publication::NetworkPublication;
 use crate::media::poller::{RecvMessage, TransportPoller};
 use crate::media::retransmit_handler::RetransmitHandler;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
-use crate::media::term_buffer::{RawLog, PARTITION_COUNT};
+use crate::media::term_buffer::{PARTITION_COUNT, RawLog};
 use crate::media::uring_poller::UringTransportPoller;
 
 /// Represents one active network publication within the sender.
@@ -143,32 +143,56 @@ impl PublicationEntry {
     #[inline]
     fn time_of_last_send_ns(&self) -> i64 {
         match self {
-            PublicationEntry::Local { time_of_last_send_ns, .. } => *time_of_last_send_ns,
-            PublicationEntry::Concurrent { time_of_last_send_ns, .. } => *time_of_last_send_ns,
+            PublicationEntry::Local {
+                time_of_last_send_ns,
+                ..
+            } => *time_of_last_send_ns,
+            PublicationEntry::Concurrent {
+                time_of_last_send_ns,
+                ..
+            } => *time_of_last_send_ns,
         }
     }
 
     #[inline]
     fn set_time_of_last_send_ns(&mut self, val: i64) {
         match self {
-            PublicationEntry::Local { time_of_last_send_ns, .. } => *time_of_last_send_ns = val,
-            PublicationEntry::Concurrent { time_of_last_send_ns, .. } => *time_of_last_send_ns = val,
+            PublicationEntry::Local {
+                time_of_last_send_ns,
+                ..
+            } => *time_of_last_send_ns = val,
+            PublicationEntry::Concurrent {
+                time_of_last_send_ns,
+                ..
+            } => *time_of_last_send_ns = val,
         }
     }
 
     #[inline]
     fn time_of_last_setup_ns(&self) -> i64 {
         match self {
-            PublicationEntry::Local { time_of_last_setup_ns, .. } => *time_of_last_setup_ns,
-            PublicationEntry::Concurrent { time_of_last_setup_ns, .. } => *time_of_last_setup_ns,
+            PublicationEntry::Local {
+                time_of_last_setup_ns,
+                ..
+            } => *time_of_last_setup_ns,
+            PublicationEntry::Concurrent {
+                time_of_last_setup_ns,
+                ..
+            } => *time_of_last_setup_ns,
         }
     }
 
     #[inline]
     fn set_time_of_last_setup_ns(&mut self, val: i64) {
         match self {
-            PublicationEntry::Local { time_of_last_setup_ns, .. } => *time_of_last_setup_ns = val,
-            PublicationEntry::Concurrent { time_of_last_setup_ns, .. } => *time_of_last_setup_ns = val,
+            PublicationEntry::Local {
+                time_of_last_setup_ns,
+                ..
+            } => *time_of_last_setup_ns = val,
+            PublicationEntry::Concurrent {
+                time_of_last_setup_ns,
+                ..
+            } => *time_of_last_setup_ns = val,
         }
     }
 
@@ -193,10 +217,8 @@ impl PublicationEntry {
         consumption_term_offset: i32,
         receiver_window: i32,
     ) {
-        let consumption_position = self.compute_position(
-            consumption_term_id,
-            consumption_term_offset as u32,
-        );
+        let consumption_position =
+            self.compute_position(consumption_term_id, consumption_term_offset as u32);
         let proposed = consumption_position.wrapping_add(receiver_window as i64);
         let current = match self {
             PublicationEntry::Local { sender_limit, .. } => sender_limit,
@@ -212,16 +234,28 @@ impl PublicationEntry {
     #[inline]
     fn time_of_last_rttm_ns(&self) -> i64 {
         match self {
-            PublicationEntry::Local { time_of_last_rttm_ns, .. } => *time_of_last_rttm_ns,
-            PublicationEntry::Concurrent { time_of_last_rttm_ns, .. } => *time_of_last_rttm_ns,
+            PublicationEntry::Local {
+                time_of_last_rttm_ns,
+                ..
+            } => *time_of_last_rttm_ns,
+            PublicationEntry::Concurrent {
+                time_of_last_rttm_ns,
+                ..
+            } => *time_of_last_rttm_ns,
         }
     }
 
     #[inline]
     fn set_time_of_last_rttm_ns(&mut self, val: i64) {
         match self {
-            PublicationEntry::Local { time_of_last_rttm_ns, .. } => *time_of_last_rttm_ns = val,
-            PublicationEntry::Concurrent { time_of_last_rttm_ns, .. } => *time_of_last_rttm_ns = val,
+            PublicationEntry::Local {
+                time_of_last_rttm_ns,
+                ..
+            } => *time_of_last_rttm_ns = val,
+            PublicationEntry::Concurrent {
+                time_of_last_rttm_ns,
+                ..
+            } => *time_of_last_rttm_ns = val,
         }
     }
 
@@ -256,7 +290,6 @@ impl PublicationEntry {
         }
     }
 
-
     /// Perform sender_scan via enum dispatch (no dyn - monomorphized paths).
     #[inline]
     fn sender_scan<F>(&mut self, limit: u32, emit: F) -> u32
@@ -272,22 +305,16 @@ impl PublicationEntry {
     /// Read frames from term buffer for retransmit (enum dispatch, no dyn).
     /// Takes &self - does not advance sender_position.
     #[inline]
-    fn retransmit_scan<F>(
-        &self,
-        term_id: i32,
-        offset: u32,
-        limit: u32,
-        emit: F,
-    ) -> u32
+    fn retransmit_scan<F>(&self, term_id: i32, offset: u32, limit: u32, emit: F) -> u32
     where
         F: FnMut(u32, &[u8]),
     {
         let initial = self.initial_term_id();
         let part_idx = RawLog::partition_index(term_id, initial);
         match self {
-            PublicationEntry::Local { publication, .. } => {
-                publication.raw_log().scan_frames(part_idx, offset, limit, emit)
-            }
+            PublicationEntry::Local { publication, .. } => publication
+                .raw_log()
+                .scan_frames(part_idx, offset, limit, emit),
             PublicationEntry::Concurrent { sender_pub, .. } => {
                 sender_pub.scan_term_at(part_idx, offset, limit, emit)
             }
@@ -552,9 +579,7 @@ impl SenderAgent {
             };
 
             // Phase 2: Send setup if needed (needs &mut endpoint + &mut poller).
-            if needs_setup
-                && (now_ns.wrapping_sub(last_setup_ns) > heartbeat_interval_ns)
-            {
+            if needs_setup && (now_ns.wrapping_sub(last_setup_ns) > heartbeat_interval_ns) {
                 let ep = &mut endpoints[ep_idx];
                 let _ = ep.send_setup(
                     poller,
@@ -783,23 +808,19 @@ impl SenderAgent {
 
         handler.process_timeouts(now_ns, |sid, stid, term_id, term_off, len| {
             // Find matching publication (linear scan, n <= 64).
-            let pub_match = publications.iter().find(|p| {
-                p.session_id() == sid && p.stream_id() == stid
-            });
+            let pub_match = publications
+                .iter()
+                .find(|p| p.session_id() == sid && p.stream_id() == stid);
 
             let Some(pub_entry) = pub_match else {
                 return; // Publication removed since NAK received.
             };
 
             // Validate NAK range is still in the term buffer.
-            let nak_position = pub_entry.compute_position(
-                term_id, term_off as u32,
-            );
+            let nak_position = pub_entry.compute_position(term_id, term_off as u32);
             let sender_pos = pub_entry.sender_position();
             let term_length = pub_entry.term_length() as i64;
-            let buffer_start = sender_pos.wrapping_sub(
-                (PARTITION_COUNT as i64 - 1) * term_length,
-            );
+            let buffer_start = sender_pos.wrapping_sub((PARTITION_COUNT as i64 - 1) * term_length);
 
             // Half-range wrapping check: nak_position must be
             // >= buffer_start and < pub_position.
@@ -816,17 +837,12 @@ impl SenderAgent {
             let mtu = pub_entry.mtu();
             let limit = if (len as u32) < mtu { len as u32 } else { mtu };
 
-            pub_entry.retransmit_scan(
-                term_id,
-                term_off as u32,
-                limit,
-                |_off, data| {
-                    if let Some(ep) = endpoints.get(ep_idx) {
-                        let _ = ep.send_data(poller, data, dest);
-                        work_count += 1;
-                    }
-                },
-            );
+            pub_entry.retransmit_scan(term_id, term_off as u32, limit, |_off, data| {
+                if let Some(ep) = endpoints.get(ep_idx) {
+                    let _ = ep.send_data(poller, data, dest);
+                    work_count += 1;
+                }
+            });
         });
 
         if work_count > 0 {
@@ -932,9 +948,8 @@ mod tests {
     const TEST_MTU: u32 = 1408;
 
     fn make_local_entry(term_length: u32) -> PublicationEntry {
-        let publication = NetworkPublication::new(
-            42, 7, 0, term_length, TEST_MTU,
-        ).expect("valid params");
+        let publication =
+            NetworkPublication::new(42, 7, 0, term_length, TEST_MTU).expect("valid params");
         PublicationEntry::Local {
             publication,
             endpoint_idx: 0,
@@ -1060,8 +1075,8 @@ mod tests {
     #[test]
     fn flow_control_partial_window() {
         // Set sender_limit to 48 (less than one full frame = 32 header + payload).
-        let publication = NetworkPublication::new(42, 7, 0, TEST_TERM_LENGTH, TEST_MTU)
-            .expect("valid params");
+        let publication =
+            NetworkPublication::new(42, 7, 0, TEST_TERM_LENGTH, TEST_MTU).expect("valid params");
         let mut entry = PublicationEntry::Local {
             publication,
             endpoint_idx: 0,
@@ -1176,4 +1191,3 @@ mod tests {
         assert_eq!(entry.time_of_last_rttm_ns(), 999_999);
     }
 }
-

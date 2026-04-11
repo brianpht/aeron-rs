@@ -4,12 +4,12 @@
 // Graceful shutdown via AtomicBool with Acquire/Release ordering (not SeqCst).
 // Monomorphized over Agent type (no dyn). Zero-allocation in duty cycle.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
-use super::{Agent, AgentError};
 use super::idle_strategy::{IdleStrategy, IdleStrategyState, idle};
+use super::{Agent, AgentError};
 
 /// Runs an agent in a duty-cycle loop with idle strategy and shutdown control.
 ///
@@ -120,8 +120,7 @@ impl AgentRunnerHandle {
         if let Some(handle) = self.join_handle.take() {
             match handle.join() {
                 Ok(result) => result,
-                Err(_panic) => Err(AgentError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                Err(_panic) => Err(AgentError::Io(std::io::Error::other(
                     "agent thread panicked",
                 ))),
             }
@@ -232,11 +231,11 @@ mod tests {
         struct FailingAgent;
 
         impl Agent for FailingAgent {
-            fn name(&self) -> &str { "failing-agent" }
+            fn name(&self) -> &str {
+                "failing-agent"
+            }
             fn do_work(&mut self) -> Result<i32, AgentError> {
-                Err(AgentError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other, "test error",
-                )))
+                Err(AgentError::Io(std::io::Error::other("test error")))
             }
         }
 
@@ -300,4 +299,3 @@ mod tests {
         assert!(result.is_ok());
     }
 }
-

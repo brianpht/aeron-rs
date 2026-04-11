@@ -1,12 +1,10 @@
 // Criterion benchmarks for RetransmitHandler hot-path operations.
 
-use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
-use aeron_rs::frame::{
-    FrameHeader, NakHeader, CURRENT_VERSION, FRAME_TYPE_NAK, NAK_TOTAL_LENGTH,
-};
-use aeron_rs::media::retransmit_handler::{RetransmitHandler, MAX_RETRANSMIT_ACTIONS};
+use aeron_rs::frame::{CURRENT_VERSION, FRAME_TYPE_NAK, FrameHeader, NAK_TOTAL_LENGTH, NakHeader};
+use aeron_rs::media::retransmit_handler::{MAX_RETRANSMIT_ACTIONS, RetransmitHandler};
 
 fn make_nak(session_id: i32, term_offset: i32) -> NakHeader {
     NakHeader {
@@ -118,4 +116,3 @@ criterion_group!(
     bench_full_nak_to_callback,
 );
 criterion_main!(benches);
-

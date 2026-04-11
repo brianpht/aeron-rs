@@ -14,8 +14,8 @@
 // - Data is written under EMPTY, read under FILLED (no concurrent access)
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::media::concurrent_publication::SenderPublication;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
@@ -78,7 +78,9 @@ impl PublicationBridge {
             if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
                 // SAFETY: Single producer. State is EMPTY so no consumer
                 // is reading this slot. Write the data, then publish.
-                unsafe { *slot.data.get() = Some(item); }
+                unsafe {
+                    *slot.data.get() = Some(item);
+                }
                 slot.state.store(SLOT_FILLED, Ordering::Release);
                 return true;
             }
@@ -138,4 +140,3 @@ mod tests {
         assert!(bridge.try_take(BRIDGE_CAPACITY + 10).is_none());
     }
 }
-

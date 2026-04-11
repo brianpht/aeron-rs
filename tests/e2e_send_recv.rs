@@ -8,10 +8,10 @@
 //   Client offer() -> shared buffer -> SenderAgent sender_scan -> UDP send
 //   -> ReceiverAgent poll_data (io_uring CQE) -> on_setup (creates image)
 //   -> on_data (writes to SharedLogBuffer) -> Subscription::poll() -> handler
-use std::time::{Duration, Instant};
 use aeron_rs::client::{MediaDriver, Publication, Subscription};
 use aeron_rs::context::DriverContext;
 use aeron_rs::media::network_publication::OfferError;
+use std::time::{Duration, Instant};
 /// Build a DriverContext with small buffers and fast timers for tests.
 /// Fast heartbeat/SM intervals reduce Setup/SM handshake latency.
 fn make_e2e_ctx() -> DriverContext {
@@ -30,11 +30,7 @@ fn make_e2e_ctx() -> DriverContext {
 }
 /// Offer a payload with retry loop for BackPressured / AdminAction.
 /// Panics on timeout or unexpected error.
-fn offer_with_retry(
-    publication: &mut Publication,
-    payload: &[u8],
-    timeout: Duration,
-) -> i64 {
+fn offer_with_retry(publication: &mut Publication, payload: &[u8], timeout: Duration) -> i64 {
     let start = Instant::now();
     loop {
         match publication.offer(payload) {
@@ -101,7 +97,12 @@ fn publication_to_subscription_single_fragment() {
     assert!(pos > 0, "position should advance after offer");
     // Poll the subscription.
     let results = poll_until(&mut sub, 1, Duration::from_secs(3));
-    assert_eq!(results.len(), 1, "expected 1 fragment, got {}", results.len());
+    assert_eq!(
+        results.len(),
+        1,
+        "expected 1 fragment, got {}",
+        results.len()
+    );
     assert_eq!(results[0].0, payload);
     assert_eq!(results[0].1, expected_session);
     assert_eq!(results[0].2, expected_stream);
@@ -179,12 +180,22 @@ fn publication_and_subscription_different_streams_isolated() {
     let results_a = poll_until(&mut sub_a, 1, Duration::from_secs(3));
     let results_b = poll_until(&mut sub_b, 1, Duration::from_secs(3));
     // sub_a should receive only pub_a's data.
-    assert_eq!(results_a.len(), 1, "sub_a expected 1 fragment, got {}", results_a.len());
+    assert_eq!(
+        results_a.len(),
+        1,
+        "sub_a expected 1 fragment, got {}",
+        results_a.len()
+    );
     assert_eq!(results_a[0].0, b"AAAA");
     assert_eq!(results_a[0].1, pub_a.session_id());
     assert_eq!(results_a[0].2, 52);
     // sub_b should receive only pub_b's data.
-    assert_eq!(results_b.len(), 1, "sub_b expected 1 fragment, got {}", results_b.len());
+    assert_eq!(
+        results_b.len(),
+        1,
+        "sub_b expected 1 fragment, got {}",
+        results_b.len()
+    );
     assert_eq!(results_b[0].0, b"BBBB");
     assert_eq!(results_b[0].1, pub_b.session_id());
     assert_eq!(results_b[0].2, 53);

@@ -40,18 +40,22 @@ fn bench_alloc_burst_recv(c: &mut Criterion) {
     c.bench_function("SlotPool alloc_recv burst 16", |b| {
         b.iter(|| {
             let mut indices = [0u16; 16];
-            for i in 0..count {
-                indices[i] = pool.alloc_recv().unwrap();
+            for item in indices.iter_mut().take(count) {
+                *item = pool.alloc_recv().unwrap();
             }
-            for i in 0..count {
-                pool.recv_slots[indices[i] as usize].state = SlotState::Free;
-                pool.free_recv(indices[i]);
+            for item in indices.iter().take(count) {
+                pool.recv_slots[*item as usize].state = SlotState::Free;
+                pool.free_recv(*item);
             }
             black_box(&indices);
         });
     });
 }
 
-criterion_group!(benches, bench_alloc_free_recv, bench_alloc_free_send, bench_alloc_burst_recv);
+criterion_group!(
+    benches,
+    bench_alloc_free_recv,
+    bench_alloc_free_send,
+    bench_alloc_burst_recv
+);
 criterion_main!(benches);
-

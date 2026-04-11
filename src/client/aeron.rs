@@ -21,11 +21,11 @@ use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::transport::UdpChannelTransport;
 
-use super::bridge::{PendingPublication, PublicationBridge};
-use super::sub_bridge::{PendingRecvEndpoint, RecvEndpointBridge, SubscriptionBridge};
-use super::publication::Publication;
-use super::subscription::Subscription;
 use super::ClientError;
+use super::bridge::{PendingPublication, PublicationBridge};
+use super::publication::Publication;
+use super::sub_bridge::{PendingRecvEndpoint, RecvEndpointBridge, SubscriptionBridge};
+use super::subscription::Subscription;
 
 /// Default driver heartbeat timeout for liveness checks (5 seconds).
 const DEFAULT_DRIVER_TIMEOUT_MS: i64 = 5_000;
@@ -60,6 +60,7 @@ impl Aeron {
     ///
     /// `cnc_base` must point to a valid, initialized CnC region that
     /// remains valid for the lifetime of this client.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn connect_in_process(
         cnc_base: *mut u8,
         cnc_length: usize,
@@ -72,9 +73,8 @@ impl Aeron {
         term_length: u32,
         mtu: u32,
     ) -> Result<Self, ClientError> {
-        let cnc = unsafe {
-            ClientCnc::from_ptr(cnc_base, cnc_length)
-        }.map_err(|_| ClientError::CncError)?;
+        let cnc = unsafe { ClientCnc::from_ptr(cnc_base, cnc_length) }
+            .map_err(|_| ClientError::CncError)?;
 
         if !cnc.is_driver_alive(DEFAULT_DRIVER_TIMEOUT_MS) {
             return Err(ClientError::DriverNotRunning);
@@ -131,8 +131,7 @@ impl Aeron {
         stream_id: i32,
     ) -> Result<Publication, ClientError> {
         // Parse channel URI.
-        let udp_channel = UdpChannel::parse(channel)
-            .map_err(|_| ClientError::ChannelInvalid)?;
+        let udp_channel = UdpChannel::parse(channel).map_err(|_| ClientError::ChannelInvalid)?;
 
         let correlation_id = self.alloc_correlation_id();
         let session_id = self.alloc_session_id();
@@ -144,7 +143,8 @@ impl Aeron {
             0, // initial_term_id
             self.term_length,
             self.mtu,
-        ).ok_or(ClientError::InvalidParams)?;
+        )
+        .ok_or(ClientError::InvalidParams)?;
 
         // Build a minimal DriverContext for transport creation.
         let transport_ctx = crate::context::DriverContext {
@@ -158,7 +158,9 @@ impl Aeron {
 
         // Open UDP transport.
         let local_addr: SocketAddr = match udp_channel.remote_data {
-            SocketAddr::V4(_) => "0.0.0.0:0".parse().map_err(|_| ClientError::ChannelInvalid)?,
+            SocketAddr::V4(_) => "0.0.0.0:0"
+                .parse()
+                .map_err(|_| ClientError::ChannelInvalid)?,
             SocketAddr::V6(_) => "[::]:0".parse().map_err(|_| ClientError::ChannelInvalid)?,
         };
         let transport = UdpChannelTransport::open(
@@ -166,7 +168,8 @@ impl Aeron {
             &local_addr,
             &udp_channel.remote_data,
             &transport_ctx,
-        ).map_err(|_| ClientError::TransportError)?;
+        )
+        .map_err(|_| ClientError::TransportError)?;
 
         // Build endpoint.
         let endpoint = SendChannelEndpoint::new(udp_channel.clone(), transport);
@@ -206,8 +209,7 @@ impl Aeron {
         let correlation_id = self.alloc_correlation_id();
 
         // Parse channel URI.
-        let udp_channel = UdpChannel::parse(channel)
-            .map_err(|_| ClientError::ChannelInvalid)?;
+        let udp_channel = UdpChannel::parse(channel).map_err(|_| ClientError::ChannelInvalid)?;
 
         // Build a minimal DriverContext for transport creation.
         let transport_ctx = crate::context::DriverContext {
@@ -223,12 +225,9 @@ impl Aeron {
         let local_addr = udp_channel.remote_data;
         let remote_addr = udp_channel.remote_data; // domain detection only
 
-        let transport = UdpChannelTransport::open(
-            &udp_channel,
-            &local_addr,
-            &remote_addr,
-            &transport_ctx,
-        ).map_err(|_| ClientError::TransportError)?;
+        let transport =
+            UdpChannelTransport::open(&udp_channel, &local_addr, &remote_addr, &transport_ctx)
+                .map_err(|_| ClientError::TransportError)?;
 
         let endpoint = ReceiveChannelEndpoint::new(
             udp_channel.clone(),
@@ -243,16 +242,13 @@ impl Aeron {
         }
 
         // Send AddSubscription via CnC for bookkeeping.
-        let cmd = AddSubscription::from_channel(
-            correlation_id,
-            self.client_id,
-            stream_id,
-            channel,
-        ).ok_or(ClientError::ChannelInvalid)?;
+        let cmd = AddSubscription::from_channel(correlation_id, self.client_id, stream_id, channel)
+            .ok_or(ClientError::ChannelInvalid)?;
 
         let mut buf = [0u8; ADD_SUBSCRIPTION_LENGTH];
         cmd.encode(&mut buf).ok_or(ClientError::InvalidParams)?;
-        self.cnc.to_driver()
+        self.cnc
+            .to_driver()
             .write(CMD_ADD_SUBSCRIPTION, &buf)
             .map_err(|_| ClientError::RegistrationFailed)?;
 
@@ -274,7 +270,9 @@ impl Aeron {
             client_id: self.client_id,
         };
         if cmd.encode(&mut self.keepalive_buf).is_some() {
-            let _ = self.cnc.to_driver()
+            let _ = self
+                .cnc
+                .to_driver()
                 .write(CMD_CLIENT_KEEPALIVE, &self.keepalive_buf);
         }
     }
@@ -310,16 +308,13 @@ impl Aeron {
         stream_id: i32,
         channel: &str,
     ) -> Result<(), ClientError> {
-        let cmd = AddPublication::from_channel(
-            correlation_id,
-            self.client_id,
-            stream_id,
-            channel,
-        ).ok_or(ClientError::ChannelInvalid)?;
+        let cmd = AddPublication::from_channel(correlation_id, self.client_id, stream_id, channel)
+            .ok_or(ClientError::ChannelInvalid)?;
 
         let mut buf = [0u8; ADD_PUBLICATION_LENGTH];
         cmd.encode(&mut buf).ok_or(ClientError::InvalidParams)?;
-        self.cnc.to_driver()
+        self.cnc
+            .to_driver()
             .write(CMD_ADD_PUBLICATION, &buf)
             .map_err(|_| ClientError::RegistrationFailed)?;
         Ok(())
@@ -370,4 +365,3 @@ mod tests {
         assert_eq!(storage.ss_family, libc::AF_INET6 as libc::sa_family_t);
     }
 }
-

@@ -26,11 +26,7 @@ pub struct Publication {
 }
 
 impl Publication {
-    pub(crate) fn new(
-        inner: ConcurrentPublication,
-        registration_id: i64,
-        channel: &str,
-    ) -> Self {
+    pub(crate) fn new(inner: ConcurrentPublication, registration_id: i64, channel: &str) -> Self {
         let len = channel.len().min(256);
         let mut buf = [0u8; 256];
         buf[..len].copy_from_slice(&channel.as_bytes()[..len]);
@@ -117,9 +113,7 @@ impl Publication {
     /// Channel URI string.
     pub fn channel(&self) -> &str {
         // SAFETY: channel_uri_buf[..len] was copied from a valid &str.
-        unsafe {
-            std::str::from_utf8_unchecked(&self.channel_uri_buf[..self.channel_uri_len])
-        }
+        unsafe { std::str::from_utf8_unchecked(&self.channel_uri_buf[..self.channel_uri_len]) }
     }
 }
 
@@ -133,4 +127,3 @@ impl std::fmt::Debug for Publication {
             .finish()
     }
 }
-

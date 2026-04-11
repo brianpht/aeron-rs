@@ -71,7 +71,12 @@ fn make_fixture(recv_slots: usize) -> TestFixture {
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     let frame = build_data_frame();
 
-    TestFixture { poller, sender, bound, frame }
+    TestFixture {
+        poller,
+        sender,
+        bound,
+        frame,
+    }
 }
 
 // ──────────────────── Benchmarks ────────────────────
@@ -148,11 +153,8 @@ fn bench_userdata_decode(c: &mut Criterion) {
 fn bench_cqe_batch_iterate(c: &mut Criterion) {
     const BATCH: usize = 256;
     let mut cqe_buf = [(0u64, 0i32); BATCH];
-    for i in 0..BATCH {
-        cqe_buf[i] = (
-            ((0u64) << 48) | ((1u64) << 40) | ((i as u64) << 24),
-            1440i32,
-        );
+    for (i, item) in cqe_buf.iter_mut().enumerate().take(BATCH) {
+        *item = (((1u64) << 40) | ((i as u64) << 24), 1440i32);
     }
 
     c.bench_function("cqe_dispatch: batch iterate 256 CQEs", |b| {
@@ -181,4 +183,3 @@ criterion_group!(
     bench_cqe_batch_iterate,
 );
 criterion_main!(benches);
-
