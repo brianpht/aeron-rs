@@ -267,6 +267,22 @@ impl ReceiverImage {
     pub fn receiver_position(&self) -> i64 {
         self.receiver_position_local
     }
+
+    /// Raw mutable pointer to the shared log buffer.
+    ///
+    /// Exposed for benchmarks that need to write pad frames or other
+    /// non-standard frame types directly into the buffer. The caller
+    /// must uphold the single-writer invariant.
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is valid for the lifetime of the ReceiverImage.
+    /// Caller must not write while a slot is in-flight or the subscriber
+    /// is reading from the same offset.
+    #[inline]
+    pub unsafe fn log_ptr(&self) -> *mut u8 {
+        unsafe { self.inner.log.as_mut_ptr() }
+    }
 }
 
 // ---- SubscriberImage impl ----

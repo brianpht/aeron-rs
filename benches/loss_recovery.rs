@@ -6,7 +6,7 @@
 //! 3. PendingNak queue into the endpoint's pre-sized array
 //! 4. Full end-to-end loss scan simulation (16 frames, 1 gap → NAK)
 //!
-//! Target: < 200 ns full scan (vs Aeron C ~200–500 ns).
+//! Target: < 200 ns full scan (vs Aeron C ~200-500 ns).
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -16,7 +16,7 @@ use aeron_rs::media::receive_channel_endpoint::PendingNak;
 
 // ──────────────────── Gap detection ────────────────────
 
-/// Wrapping gap detection — mirrors InlineHandler::on_data.
+/// Wrapping gap detection - mirrors InlineHandler::on_data.
 /// Uses wrapping_sub + half-range check as required by coding rules.
 #[inline(always)]
 fn detect_gap(expected_offset: i32, received_offset: i32) -> bool {
@@ -152,7 +152,7 @@ fn bench_loss_scan_full(c: &mut Criterion) {
     });
 }
 
-/// Scan with NO gaps — measures the baseline scan cost when data is clean.
+/// Scan with NO gaps - measures the baseline scan cost when data is clean.
 fn bench_loss_scan_no_gap(c: &mut Criterion) {
     c.bench_function("loss: full scan (16 frames, 0 gaps)", |b| {
         b.iter(|| {

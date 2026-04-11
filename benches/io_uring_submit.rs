@@ -5,10 +5,10 @@
 //! operation in the driver, independent of Aeron protocol logic.
 //!
 //! Benchmarks:
-//!   - NOP submit+reap (single / burst)  — kernel roundtrip floor
-//!   - SQE push only (no submit)         — userspace ring cost
-//!   - submit() with empty ring           — syscall overhead
-//!   - UDP sendmsg+reap                  — real network I/O baseline
+//!   - NOP submit+reap (single / burst)  - kernel roundtrip floor
+//!   - SQE push only (no submit)         - userspace ring cost
+//!   - submit() with empty ring          - syscall overhead
+//!   - UDP sendmsg+reap                  - real network I/O baseline
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -66,7 +66,7 @@ fn bench_uring_nop_burst_16(c: &mut Criterion) {
 // ──────────────────── SQE push only ────────────────────
 
 /// Just the userspace cost of pushing an SQE into the submission ring.
-/// No io_uring_enter syscall — isolates the ring buffer write.
+/// No io_uring_enter syscall - isolates the ring buffer write.
 fn bench_uring_sqe_push_only(c: &mut Criterion) {
     let mut ring = IoUring::new(4096).expect("io_uring::new");
     let mut pushed = 0u32;
@@ -164,7 +164,7 @@ fn bench_uring_udp_sendmsg(c: &mut Criterion) {
     });
 }
 
-/// UDP sendmsg burst of 16 — amortised send cost.
+/// UDP sendmsg burst of 16 - amortised send cost.
 fn bench_uring_udp_sendmsg_burst_16(c: &mut Criterion) {
     use std::net::UdpSocket;
     use std::os::unix::io::AsRawFd;
@@ -359,7 +359,7 @@ fn bench_uring_udp_recvmsg_rearm_submit(c: &mut Criterion) {
 // ──────────────────── Multishot RecvMsg with buf_ring ────────────────────
 
 /// Multishot RecvMsgMulti with provided buffer ring: CQ drain + return_buf only.
-/// No SQE re-arm or submit — the multishot stays active across completions.
+/// No SQE re-arm or submit - the multishot stays active across completions.
 /// This is the NEW baseline after the multishot migration.
 ///   improvement = bench_recvmsg_rearm_submit − this_benchmark
 fn bench_uring_udp_recvmsg_multishot(c: &mut Criterion) {

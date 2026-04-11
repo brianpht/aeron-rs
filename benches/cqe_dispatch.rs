@@ -4,7 +4,7 @@
 //! path in `UringTransportPoller::poll_recv`. We send packets from a std
 //! socket, then time a single `poll_recv` that reaps them.
 //!
-//! Target: < 50 ns/msg (vs Aeron C conductor ~100–300 ns).
+//! Target: < 50 ns/msg (vs Aeron C conductor ~100-300 ns).
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -131,7 +131,7 @@ fn bench_cqe_dispatch_burst_16(c: &mut Criterion) {
 }
 
 /// Pure CPU cost of the UserData decode (bit-shift extraction from u64).
-/// No io_uring involved — isolates the decode logic.
+/// No io_uring involved - isolates the decode logic.
 fn bench_userdata_decode(c: &mut Criterion) {
     // Simulates the decode path inside poll_recv:
     //   transport_idx = bits[63:48], op = bits[47:40], slot_idx = bits[39:24]
@@ -148,7 +148,7 @@ fn bench_userdata_decode(c: &mut Criterion) {
     });
 }
 
-/// CQE batch harvest simulation — iterate a pre-filled (u64, i32) buffer
+/// CQE batch harvest simulation - iterate a pre-filled (u64, i32) buffer
 /// and extract UserData fields. Measures the reap loop without kernel interaction.
 fn bench_cqe_batch_iterate(c: &mut Criterion) {
     const BATCH: usize = 256;

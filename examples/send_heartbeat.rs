@@ -36,14 +36,16 @@ fn main() {
     let mut agent = SenderAgent::new(&ctx).expect("sender agent");
     let ep_idx = agent.add_endpoint(endpoint).expect("add endpoint");
 
-    agent.add_publication(
-        ep_idx,
-        /*session_id=*/ 1001,
-        /*stream_id=*/ 10,
-        /*initial_term_id=*/ 0,
-        /*term_length=*/ 1 << 16,
-        /*mtu=*/ 1408,
-    );
+    agent
+        .add_publication(
+            ep_idx,
+            /*session_id=*/ 1001,
+            /*stream_id=*/ 10,
+            /*initial_term_id=*/ 0,
+            /*term_length=*/ 1 << 16,
+            /*mtu=*/ 1408,
+        )
+        .expect("add publication");
 
     println!("Starting sender agent on dedicated thread (100 ms run)...");
     let runner = AgentRunner::new(agent, ctx.idle_strategy());

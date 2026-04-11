@@ -156,5 +156,5 @@ fn main() {
     println!("  rttm   → {:?}", classify_frame(&rttm_buf));
     println!("  empty  → {:?}", classify_frame(&[]));
 
-    println!("\nAll frame roundtrips passed ✓");
+    println!("\nAll frame roundtrips passed [OK]");
 }
