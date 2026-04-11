@@ -33,11 +33,21 @@ use crate::media::term_buffer::{
 
 /// Shared state between publisher and sender, wrapped in Arc.
 /// Allocated once at construction (cold path). Never resized.
+///
+/// Layout: pub_position and sender_position are on separate cache lines
+/// to avoid false sharing. The publisher thread stores pub_position on
+/// every offer(); the sender thread stores sender_position on every
+/// sender_scan(). Without padding, both atomics share a cache line and
+/// each store invalidates the other core's copy.
 pub(crate) struct PublicationInner {
     log: SharedLogBuffer,
     /// Highest published byte position. Written by publisher (Release),
     /// read by external observers.
     pub_position: AtomicI64,
+    // Cache-line padding: separate pub_position and sender_position to
+    // avoid false sharing between publisher thread and sender thread.
+    // AtomicI64 = 8 bytes, pad to 64-byte cache line boundary.
+    _pad: [u8; 56],
     /// Highest scanned byte position. Written by sender (Release),
     /// read by publisher (Acquire) for back-pressure.
     sender_position: AtomicI64,
@@ -116,6 +126,7 @@ pub fn new_concurrent(
     let inner = Arc::new(PublicationInner {
         log,
         pub_position: AtomicI64::new(0),
+        _pad: [0u8; 56],
         sender_position: AtomicI64::new(0),
         initial_term_id,
         term_length,

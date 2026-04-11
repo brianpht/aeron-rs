@@ -79,7 +79,7 @@ fn main() {
         // Fast heartbeat/SM for quick Setup handshake.
         heartbeat_interval_ns: Duration::from_millis(5).as_nanos() as i64,
         sm_interval_ns: Duration::from_millis(10).as_nanos() as i64,
-        // Adaptive SM for faster flow control feedback.
+        // Adaptive SM: queue SM immediately on data receipt.
         send_sm_on_data: true,
         // Poll control every duty cycle for maximum throughput.
         send_duty_cycle_ratio: 1,
@@ -94,6 +94,14 @@ fn main() {
         // Large socket buffers for burst absorption.
         socket_sndbuf: 4 * 1024 * 1024,
         socket_rcvbuf: 4 * 1024 * 1024,
+        // 256 KiB term buffer: 768 KiB back-pressure headroom (~545 frames).
+        // Default 64 KiB only gives 192 KiB (~136 frames), which a burst
+        // of 128 nearly exhausts in a single iteration.
+        term_buffer_length: 256 * 1024,
+        // Receiver window: 256 KiB covers 1 full term of frames so sender_limit
+        // advances sufficiently per SM round-trip. Default (term_length / 2)
+        // restricts the sender to ~22 frames per SM.
+        receiver_window: Some(256 * 1024),
         ..DriverContext::default()
     };
 
@@ -159,8 +167,8 @@ fn main() {
         recvd += polled as u64;
 
         // If back-pressured and no data polled, yield to let agent
-        // threads run. Without this, the main thread starves the
-        // sender/receiver agents of CPU on machines with fewer cores.
+        // threads run. On machines with fewer cores than threads, this
+        // releases the timeslice so agents can make progress.
         if bp_this_burst && polled == 0 {
             std::thread::yield_now();
         }
