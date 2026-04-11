@@ -9,11 +9,15 @@
 //! The three agents (conductor, sender, receiver) run on dedicated threads,
 //! processing the network path asynchronously.
 //!
+//! The subscriber handles UDP packet loss via gap-skip: when the receiver
+//! writes frames out of order (due to loss + retransmit), the subscriber
+//! detects gaps and skips past them to continue delivering subsequent data.
+//! Pad frames (term boundary fill) are also silently skipped.
+//!
 //! Primary metric: **send rate** (offer -> sender agent -> io_uring -> UDP).
-//! Receive counting via Subscription::poll() is reported but may be lower
-//! than sent because SubscriberImage does not yet handle term rotation
-//! (the subscriber stalls at the first term boundary gap). This will be
-//! resolved when receiver-side pad frame injection is implemented.
+//! Receive rate via Subscription::poll() is reported but will be lower due
+//! to UDP packet loss under burst load on loopback. Loss percentage reflects
+//! unrecoverable gaps (retransmit + gap-skip).
 //!
 //! Targets (vs Aeron C EmbeddedThroughput ~2-3 M msg/s):
 //!   send rate >= 500K msg/s with MTU payload through full stack

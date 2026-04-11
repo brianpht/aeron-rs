@@ -785,6 +785,42 @@ stateDiagram-v2
 - Sender computes: `rtt_sample = now - echo_timestamp - reception_delta`
 - SRTT update: `srtt = srtt * 7/8 + sample * 1/8` (shift-based, no division)
 
+### Subscriber-Side Gap-Skip (ADR-002)
+
+When retransmit fails (NAK lost, retransmit frame dropped, sender buffer overwritten), the subscriber must not stall
+permanently. The subscriber detects gaps and skips past them to continue delivering subsequent data.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ReadFrameLength: poll_fragments loop
+
+    ReadFrameLength --> DeliverData: frame_length > 0, frame_type = DATA
+    ReadFrameLength --> SkipPad: frame_length > 0, frame_type = PAD
+    ReadFrameLength --> CheckGap: frame_length <= 0
+
+    CheckGap --> EndOfData: receiver_position <= current_position
+    CheckGap --> ScanForward: receiver_position > current_position
+
+    ScanForward --> SkipGap: found committed frame ahead
+    ScanForward --> AdvanceToTermEnd: no committed frame in term
+
+    DeliverData --> ReadFrameLength: advance pos, fragments++
+    SkipPad --> ReadFrameLength: advance pos (no fragment count)
+    SkipGap --> ReadFrameLength: advance pos past gap
+    AdvanceToTermEnd --> Done: pos = term_length
+
+    EndOfData --> Done
+    Done --> [*]
+```
+
+Three-layer loss recovery model (matches Aeron C/Java):
+
+| Layer | Component | Status | Description |
+|-------|-----------|--------|-------------|
+| 1. Transport | NAK + RetransmitHandler | Implemented | Receiver detects gap, sends NAK, sender retransmits |
+| 2. Subscriber | Gap-skip in poll_fragments | Implemented (ADR-002) | Subscriber detects unrecoverable gaps via receiver_position, scans forward |
+| 3. Application | Loss handler callback | Not yet | Optional `on_loss(term_id, offset, length)` callback for app-level recovery |
+
 ---
 
 ## 16. Data Flow Diagrams
@@ -930,12 +966,15 @@ flowchart TD
 - [x] CnC ring buffers + broadcast
 - [x] Flow control (sender_limit from SM)
 - [x] Loss recovery (NAK-driven retransmit with delay/linger)
+- [x] Subscriber gap-skip and pad frame handling (ADR-002)
 - [x] RTT measurement (RTTM echo)
 - [x] 3-phase idle strategy (spin/yield/park)
 - [x] Subscription data path (SharedImage + SubscriptionBridge + Subscription::poll)
 
 ### Not Yet Implemented
 
+- [ ] **Loss handler callback** - optional `on_loss()` callback in `poll_fragments` for app-level recovery (layer 3)
+- [ ] **Receiver-side gap-fill** - receiver writes pad frames into gaps after retransmit timeout (reduces gap-skip scan)
 - [ ] **Multi-destination cast (MDC)** - dynamic control mode, multiple destinations
 - [ ] **Congestion control** - currently static receiver window
 - [ ] **Counters file** - position limit counter, channel status indicator

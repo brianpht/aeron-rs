@@ -19,10 +19,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use crate::frame::DATA_HEADER_LENGTH;
+use crate::frame::{DATA_HEADER_LENGTH, FRAME_TYPE_PAD};
 use crate::media::term_buffer::{
-    AppendError, PARTITION_COUNT, SharedLogBuffer, align_frame_length, atomic_frame_length_load,
-    atomic_frame_length_store, partition_index,
+    AppendError, FRAME_ALIGNMENT, PARTITION_COUNT, SharedLogBuffer, align_frame_length,
+    atomic_frame_length_load, atomic_frame_length_store, partition_index,
 };
 
 // ---- Shared inner state ----
@@ -276,14 +276,27 @@ impl SubscriberImage {
     ///
     /// Walks forward through committed frames using Acquire loads on
     /// frame_length (same scan pattern as SenderPublication::sender_scan).
-    /// Calls `handler(payload, session_id, stream_id)` for each fragment.
+    /// Calls `handler(payload, session_id, stream_id)` for each data fragment.
     ///
-    /// Returns the number of fragments delivered (not bytes).
+    /// Gap handling (Aeron-style loss recovery):
+    ///   When frame_length <= 0, checks receiver_position (Acquire) to
+    ///   distinguish "no more data" from "gap in the middle of written data".
+    ///   If a gap is detected (receiver ahead), scans forward to find the
+    ///   next committed frame and skips the gap. Lost bytes are not delivered.
+    ///
+    /// Pad frame handling:
+    ///   Frames with frame_type == FRAME_TYPE_PAD are skipped (position
+    ///   advances) without invoking the handler. Pad frames appear at
+    ///   term boundaries (written by the publisher) and in gap-fill regions
+    ///   (written by the receiver after retransmit timeout).
+    ///
+    /// Returns the number of data fragments delivered (not bytes, not pads).
     ///
     /// After polling, stores subscriber_position with Release so the
     /// receiver can see freed space for back-pressure.
     ///
-    /// Zero-allocation, O(n) in fragments polled. Hot path.
+    /// Zero-allocation, O(n) in fragments polled (normal path).
+    /// Gap scan is O(gap_size / FRAME_ALIGNMENT), bounded by term_length.
     pub fn poll_fragments<F>(&mut self, mut handler: F, limit: i32) -> i32
     where
         F: FnMut(&[u8], i32, i32),
@@ -320,9 +333,38 @@ impl SubscriberImage {
             // Acquire load of frame_length - pairs with receiver's Release store.
             let frame_length = unsafe { atomic_frame_length_load(buf_ptr, byte_offset) };
 
-            // Zero or negative means uncommitted / not yet written.
             if frame_length <= 0 {
-                break;
+                // Check if this is a gap (receiver has written past this point)
+                // or genuine end of available data.
+                let recv_pos = inner.receiver_position.load(Ordering::Acquire);
+                let current_pos = self.subscriber_position_local + bytes_scanned as i64;
+                if recv_pos <= current_pos {
+                    // No data past this point - normal end of available data.
+                    break;
+                }
+
+                // Gap detected - receiver is ahead. Scan forward for the next
+                // committed frame within this term. The scan is bounded by
+                // term_length / FRAME_ALIGNMENT (at most 2048 for 64 KiB term).
+                let mut skip = FRAME_ALIGNMENT as u32;
+                while pos + skip < inner.term_length {
+                    let fl = unsafe {
+                        atomic_frame_length_load(buf_ptr, part_base + (pos + skip) as usize)
+                    };
+                    if fl > 0 {
+                        break;
+                    }
+                    skip += FRAME_ALIGNMENT as u32;
+                }
+
+                // Clamp skip to term boundary.
+                if pos + skip > inner.term_length {
+                    skip = inner.term_length - pos;
+                }
+
+                pos += skip;
+                bytes_scanned += skip;
+                continue;
             }
 
             let frame_len_u = frame_length as u32;
@@ -337,6 +379,21 @@ impl SubscriberImage {
             // Would exceed partition bounds.
             if pos + aligned_len > inner.term_length {
                 break;
+            }
+
+            // Check frame_type for FRAME_TYPE_PAD. Read from offset 6 within
+            // the frame (frame_type field is at bytes [6..8] of FrameHeader).
+            // Field-by-field little-endian decode per coding rules.
+            let frame_type = unsafe {
+                let ft_ptr = buf_ptr.add(byte_offset + 6);
+                u16::from_le_bytes([*ft_ptr, *ft_ptr.add(1)])
+            };
+
+            if frame_type == FRAME_TYPE_PAD {
+                // Pad frame - advance position without delivering to handler.
+                pos += aligned_len;
+                bytes_scanned += aligned_len;
+                continue;
             }
 
             // Extract payload (everything after the 32-byte DataHeader).
@@ -812,5 +869,210 @@ mod tests {
 
         writer.join().unwrap();
         assert_eq!(total, 20);
+    }
+
+    // ---- Gap-skip tests ----
+
+    #[test]
+    fn gap_skip_single_frame_gap() {
+        // Write frames at offsets 0 and 64, leaving a gap at 32.
+        // Subscriber should skip the gap and deliver both frames.
+        let tl: u32 = 256;
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0).unwrap();
+
+        // Frame at offset 0 (header-only, 32 bytes).
+        let hdr0 = make_data_header(DATA_HEADER_LENGTH as i32, 0, 42, 7, 0);
+        recv.append_frame(0, 0, &hdr0, &[]).unwrap();
+
+        // Skip offset 32 (gap), write at offset 64.
+        let hdr2 = make_data_header(DATA_HEADER_LENGTH as i32, 64, 42, 7, 0);
+        recv.append_frame(0, 64, &hdr2, &[]).unwrap();
+
+        // Receiver position past both frames (offset 96).
+        recv.advance_receiver_position(96);
+
+        let mut count = 0i32;
+        count += sub.poll_fragments(|_, _, _| {}, 100);
+
+        // Should deliver both data frames (skipping the gap at 32).
+        assert_eq!(count, 2, "should deliver 2 frames, skipping the gap");
+        assert_eq!(sub.position(), 96);
+    }
+
+    #[test]
+    fn gap_skip_advances_to_term_boundary() {
+        // Write one frame at offset 0, then leave the rest of term empty
+        // but advance receiver_position past the term boundary.
+        let tl: u32 = 128;
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0).unwrap();
+
+        let hdr0 = make_data_header(DATA_HEADER_LENGTH as i32, 0, 42, 7, 0);
+        recv.append_frame(0, 0, &hdr0, &[]).unwrap();
+
+        // Receiver is in term 1 (past the entire term 0).
+        recv.advance_receiver_position(tl as i64 + 32);
+
+        let count = sub.poll_fragments(|_, _, _| {}, 100);
+        // One data frame delivered, then gap-skip to term boundary.
+        assert_eq!(count, 1);
+        assert_eq!(sub.position(), tl as i64, "should advance to term boundary");
+    }
+
+    #[test]
+    fn gap_skip_multiple_gaps() {
+        // Frames at 0, 64, 128 with gaps at 32 and 96.
+        let tl: u32 = 256;
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0).unwrap();
+
+        let hdr0 = make_data_header(DATA_HEADER_LENGTH as i32, 0, 42, 7, 0);
+        recv.append_frame(0, 0, &hdr0, &[]).unwrap();
+        // gap at 32
+        let hdr2 = make_data_header(DATA_HEADER_LENGTH as i32, 64, 42, 7, 0);
+        recv.append_frame(0, 64, &hdr2, &[]).unwrap();
+        // gap at 96
+        let hdr4 = make_data_header(DATA_HEADER_LENGTH as i32, 128, 42, 7, 0);
+        recv.append_frame(0, 128, &hdr4, &[]).unwrap();
+
+        recv.advance_receiver_position(160);
+
+        let count = sub.poll_fragments(|_, _, _| {}, 100);
+        assert_eq!(count, 3, "should deliver 3 frames, skipping 2 gaps");
+        assert_eq!(sub.position(), 160);
+    }
+
+    #[test]
+    fn no_gap_skip_when_receiver_not_ahead() {
+        // Write one frame, do NOT advance receiver_position beyond it.
+        // The zero at offset 32 should be treated as "end of data", not a gap.
+        let tl: u32 = 256;
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0).unwrap();
+
+        let hdr0 = make_data_header(DATA_HEADER_LENGTH as i32, 0, 42, 7, 0);
+        recv.append_frame(0, 0, &hdr0, &[]).unwrap();
+        recv.advance_receiver_position(32);
+
+        let count = sub.poll_fragments(|_, _, _| {}, 100);
+        assert_eq!(count, 1);
+        assert_eq!(sub.position(), 32, "should stop at receiver position");
+    }
+
+    // ---- Pad frame tests ----
+
+    #[test]
+    fn pad_frame_skipped_without_delivery() {
+        let tl: u32 = 256;
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0).unwrap();
+
+        // Write a data frame at offset 0.
+        let hdr0 = make_data_header(DATA_HEADER_LENGTH as i32, 0, 42, 7, 0);
+        recv.append_frame(0, 0, &hdr0, &[]).unwrap();
+
+        // Write a pad frame at offset 32 covering the rest of the term.
+        // Manually write a pad frame using the commit protocol.
+        let pad_length = (tl - 32) as i32;
+        let pad_hdr = DataHeader {
+            frame_header: FrameHeader {
+                frame_length: 0, // will be committed atomically
+                version: CURRENT_VERSION,
+                flags: 0,
+                frame_type: FRAME_TYPE_PAD,
+            },
+            term_offset: 32,
+            session_id: 42,
+            stream_id: 7,
+            term_id: 0,
+            reserved_value: 0,
+        };
+        // Use append_frame to write the header (it stores frame_length from the
+        // header parameter but we need to override frame_type). Write manually:
+        unsafe {
+            let buf_ptr = recv.inner.log.as_mut_ptr();
+            let base = 32usize; // partition 0, offset 32
+            std::ptr::copy_nonoverlapping(
+                &pad_hdr as *const DataHeader as *const u8,
+                buf_ptr.add(base),
+                DATA_HEADER_LENGTH,
+            );
+            atomic_frame_length_store(buf_ptr, base, pad_length);
+        }
+
+        recv.advance_receiver_position(tl as i64);
+
+        let mut payloads = Vec::new();
+        let count = sub.poll_fragments(
+            |data, _, _| {
+                payloads.push(data.len());
+            },
+            100,
+        );
+        // Only the data frame should be delivered, not the pad.
+        assert_eq!(count, 1, "pad frame should not be counted as a fragment");
+        // Position should advance past both the data frame and the pad.
+        assert_eq!(
+            sub.position(),
+            tl as i64,
+            "position should advance past pad"
+        );
+    }
+
+    #[test]
+    fn pad_frame_between_data_frames() {
+        // Data at 0, pad at 32 (64 bytes), data at 96.
+        let tl: u32 = 256;
+        let (mut recv, mut sub) = new_shared_image(42, 7, 0, 0, tl, 0).unwrap();
+
+        // Data frame at offset 0.
+        let hdr0 = make_data_header(DATA_HEADER_LENGTH as i32, 0, 42, 7, 0);
+        recv.append_frame(0, 0, &hdr0, &[]).unwrap();
+
+        // Pad frame at offset 32, covering 64 bytes (to offset 96).
+        unsafe {
+            let buf_ptr = recv.inner.log.as_mut_ptr();
+            let pad_hdr = DataHeader {
+                frame_header: FrameHeader {
+                    frame_length: 0,
+                    version: CURRENT_VERSION,
+                    flags: 0,
+                    frame_type: FRAME_TYPE_PAD,
+                },
+                term_offset: 32,
+                session_id: 42,
+                stream_id: 7,
+                term_id: 0,
+                reserved_value: 0,
+            };
+            std::ptr::copy_nonoverlapping(
+                &pad_hdr as *const DataHeader as *const u8,
+                buf_ptr.add(32),
+                DATA_HEADER_LENGTH,
+            );
+            atomic_frame_length_store(buf_ptr, 32, 64);
+        }
+
+        // Data frame at offset 96.
+        let payload = [0xBE, 0xEF];
+        let hdr3 = make_data_header(
+            DATA_HEADER_LENGTH as i32 + payload.len() as i32,
+            96,
+            42,
+            7,
+            0,
+        );
+        recv.append_frame(0, 96, &hdr3, &payload).unwrap();
+
+        recv.advance_receiver_position(160);
+
+        let mut found = Vec::new();
+        let count = sub.poll_fragments(
+            |data, _, _| {
+                found.push(data.to_vec());
+            },
+            100,
+        );
+        // Two data frames delivered (pad skipped).
+        assert_eq!(count, 2);
+        assert!(found[0].is_empty(), "first frame has no payload");
+        assert_eq!(&found[1], &[0xBE, 0xEF], "second frame has payload");
+        assert_eq!(sub.position(), 160);
     }
 }

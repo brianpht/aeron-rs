@@ -161,7 +161,6 @@ struct ImageEntry {
     /// Term configuration from setup frame.
     initial_term_id: i32,
     active_term_id: i32,
-    #[allow(dead_code)]
     term_length: u32,
     /// Consumption tracking.
     consumption_term_id: i32,
@@ -355,6 +354,15 @@ impl<'a> DataFrameHandler for InlineHandler<'a> {
                         // Adaptive SM: flag for immediate SM in send_control_messages.
                         if self.send_sm_on_data {
                             img.sm_pending = true;
+                        }
+                        // Advance receiver position (high-water mark) so the
+                        // subscriber can detect data beyond gaps and compute
+                        // back-pressure. Only advance forward (wrapping-safe).
+                        let term_count = term_id.wrapping_sub(img.initial_term_id) as i64;
+                        let new_pos = term_count * img.term_length as i64 + new_offset as i64;
+                        let advance = new_pos.wrapping_sub(recv_image.receiver_position());
+                        if advance > 0 && advance < (i64::MAX / 2) {
+                            recv_image.advance_receiver_position(new_pos);
                         }
                     }
                     Err(_) => {
@@ -1965,6 +1973,162 @@ mod tests {
             images[0].receiver_window,
             TEST_TERM_LENGTH as i32 / 2,
             "receiver_window should default to term_length / 2"
+        );
+    }
+
+    // ---- receiver position advancement ----
+
+    #[test]
+    fn on_data_advances_receiver_position() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
+            };
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+
+            // Before any data, receiver position should be 0 (initial).
+            let recv_img = handles[0].as_ref().unwrap();
+            assert_eq!(recv_img.receiver_position(), 0);
+        }
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
+            };
+            // Header-only frame at offset 0 (32 bytes aligned).
+            let dh = make_data_header(42, 7, 0, 0, 0);
+            handler.on_data(&dh, &[], &source);
+        }
+        // Receiver position should now be 32 (aligned end of frame).
+        let recv_img = handles[0].as_ref().unwrap();
+        assert_eq!(
+            recv_img.receiver_position(),
+            32,
+            "receiver_position should advance after on_data"
+        );
+    }
+
+    #[test]
+    fn on_data_receiver_position_monotonically_increases() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
+            };
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+
+            // Frame at offset 0.
+            let dh0 = make_data_header(42, 7, 0, 0, 0);
+            handler.on_data(&dh0, &[], &source);
+            // Frame at offset 32.
+            let dh1 = make_data_header(42, 7, 0, 32, 0);
+            handler.on_data(&dh1, &[], &source);
+            // Duplicate at offset 0 (retransmit) - should NOT regress position.
+            let dh_dup = make_data_header(42, 7, 0, 0, 0);
+            handler.on_data(&dh_dup, &[], &source);
+        }
+        let recv_img = handles[0].as_ref().unwrap();
+        assert_eq!(
+            recv_img.receiver_position(),
+            64,
+            "receiver_position should not regress on duplicate"
+        );
+    }
+
+    #[test]
+    fn on_data_receiver_position_advances_across_terms() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) =
+            make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
+            };
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+
+            // Frame in term 0 at offset 0.
+            let dh0 = make_data_header(42, 7, 0, 0, 0);
+            handler.on_data(&dh0, &[], &source);
+        }
+        let pos_after_term0 = handles[0].as_ref().unwrap().receiver_position();
+        assert_eq!(pos_after_term0, 32);
+
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
+            };
+            // Frame in term 1 at offset 0 (triggers rotation).
+            let dh1 = make_data_header(42, 7, 1, 0, 0);
+            handler.on_data(&dh1, &[], &source);
+        }
+        let pos_after_term1 = handles[0].as_ref().unwrap().receiver_position();
+        // term_count=1 * term_length + 32 = TEST_TERM_LENGTH + 32
+        assert_eq!(
+            pos_after_term1,
+            TEST_TERM_LENGTH as i64 + 32,
+            "receiver_position should advance into term 1"
         );
     }
 }
