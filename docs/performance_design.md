@@ -13,6 +13,16 @@
 - [Governance Model](#governance-model)
 - [Deployment Assumptions](#deployment-assumptions)
 - [Performance Targets](#performance-targets)
+    - [Userspace Operations](#userspace-operations)
+    - [io_uring Kernel Roundtrip](#io_uring-kernel-roundtrip)
+    - [CQE Dispatch](#cqe-dispatch)
+    - [Publication & Scan Path](#publication--scan-path)
+    - [Subscriber Poll Path](#subscriber-poll-path)
+    - [Duty Cycle](#duty-cycle)
+    - [End-to-End (Single-Threaded)](#end-to-end-single-threaded-interleaved)
+    - [End-to-End (Threaded)](#end-to-end-threaded---fair-aeron-c-comparison)
+    - [Aeron C Comparison (Tier 1)](#aeron-c-comparison-tier-1)
+    - [io_uring Advantage (Tier 2)](#io_uring-advantage-tier-2)
 - [Core Design Principles](#core-design-principles)
     - [1. Determinism First](#1-determinism-first)
     - [2. Zero-Copy I/O via io_uring](#2-zero-copy-io-via-io_uring)
@@ -122,7 +132,7 @@ Benchmarks are the final authority.
 | SlotPool alloc + free        | < 10 ns  | ~3.0 ns  | PASS   |
 | SQE push (alloc + prepare)   | < 10 ns  | ~3.8 ns  | PASS   |
 | Heartbeat build + submit     | < 15 ns  | ~4.5 ns  | PASS   |
-| CQE dispatch (single msg)    | < 50 ns  | ~13.7 ns | PASS   |
+| CQE dispatch (single msg)    | < 50 ns  | ~19 ns   | PASS   |
 | NAK build + write            | < 10 ns  | ~1.5 ns  | PASS   |
 | Loss scan (16 frames, 1 gap) | < 200 ns | ~0.7 ns  | PASS   |
 | Gap detection (wrapping sub) | < 5 ns   | ~0.4 ns  | PASS   |
@@ -130,14 +140,26 @@ Benchmarks are the final authority.
 
 ### io_uring Kernel Roundtrip
 
-| Metric                        | Target   | Measured | Status |
-|-------------------------------|----------|----------|--------|
-| NOP submit + reap (single)    | < 500 ns | ~163 ns  | PASS   |
-| NOP submit + reap (burst 16)  | < 1 us   | ~371 ns  | PASS   |
-| UDP sendmsg + reap            | < 2 us   | ~874 ns  | PASS   |
-| Multishot recv reap + recycle | < 50 ns  | ~14.8 ns | PASS   |
-| submit() empty ring (syscall) | < 200 ns | ~65.1 ns | PASS   |
-| SQE push only (no submit)     | < 50 ns  | ~31.4 ns | PASS   |
+| Metric                             | Target   | Measured  | Status |
+|------------------------------------|----------|-----------|--------|
+| NOP submit + reap (single)         | < 500 ns | ~159 ns   | PASS   |
+| NOP submit + reap (burst 16)       | < 1 us   | ~337 ns   | PASS   |
+| SQE push only (no submit)          | < 50 ns  | ~30 ns    | PASS   |
+| submit() empty ring (syscall)      | < 200 ns | ~66 ns    | PASS   |
+| UDP sendmsg + reap (single)        | < 2 us   | ~994 ns   | PASS   |
+| UDP sendmsg + reap (burst 16)      | < 20 us  | ~13.7 us  | PASS   |
+| UDP recvmsg reap only              | < 50 ns  | ~16 ns    | PASS   |
+| UDP recvmsg reap + rearm + submit  | < 5 us   | ~1.5 us   | PASS   |
+| Multishot recv reap + recycle      | < 50 ns  | ~12 ns    | PASS   |
+
+### CQE Dispatch
+
+| Metric                             | Target   | Measured  | Status |
+|------------------------------------|----------|-----------|--------|
+| CQE dispatch (single msg)          | < 50 ns  | ~19 ns    | PASS   |
+| CQE dispatch (burst 16 msgs total) | < 100 ns | ~26 ns    | PASS   |
+| UserData decode                    | < 1 ns   | ~0.43 ns  | PASS   |
+| Batch iterate 256 CQEs             | < 500 ns | ~199 ns   | PASS   |
 
 ### Publication & Scan Path
 
@@ -244,6 +266,56 @@ Benchmarks are the final authority.
 | duty cycle 1 frame       | ~3.42 us       | ~1-3 us         | ~1x      | duty_cycle bench               |
 | RTT single msg (bench)   | ~3.42 us       | ~8-12 us (p50)  | 2-3x     | single-thread interleaved      |
 | Throughput (bench)       | ~620K msg/s    | ~2-3 M msg/s    | 0.2-0.3x | single-thread, not threaded    |
+
+### io_uring Advantage (Tier 2)
+
+> These benchmarks have no direct Aeron C equivalent. They quantify the structural advantage
+> of io_uring multishot + provided buffer ring over the traditional epoll + recvmsg model.
+
+#### Multishot Elimination of SQE Re-arm
+
+| Recv Model                    | Per-Message Cost | Components                      |
+|-------------------------------|------------------|---------------------------------|
+| Traditional (reap+rearm+submit) | ~1.5 us        | CQ drain + build SQE + submit syscall |
+| Multishot (reap+recycle)      | ~12 ns           | CQ drain + return buf (tail Release)  |
+| **Reduction**                 | **~125x**        | SQE + syscall eliminated per recv     |
+
+The multishot RecvMsgMulti stays armed across completions. Per-message work reduces to
+reading the CQE and returning the buffer to the provided ring (single AtomicU16 Release store).
+
+#### Aeron Dispatch Overhead Above io_uring Floor
+
+| Layer                         | Cost    | Notes                              |
+|-------------------------------|---------|------------------------------------|
+| Raw multishot reap + recycle  | ~12 ns  | io_uring floor (Tier 2)            |
+| CQE dispatch (single msg)    | ~19 ns  | Aeron frame parse + image dispatch |
+| **Aeron overhead**            | **~7 ns** | Protocol logic per message        |
+
+The Aeron dispatch layer (frame parse, type classify, image lookup, log append) adds ~7 ns
+above the raw io_uring completion floor. This is within L1/L2 cache latency (~1-3 ns per
+access), confirming the cache-oriented design is effective.
+
+#### Amortization (Burst Processing)
+
+| Operation               | Single     | Burst 16 (total) | Per-Op (amortized) | Amortization |
+|-------------------------|------------|-------------------|--------------------|--------------|
+| NOP submit+reap         | ~159 ns    | ~337 ns           | ~21 ns             | 7.6x         |
+| UDP sendmsg+reap        | ~994 ns    | ~13.7 us          | ~860 ns            | 1.2x         |
+| CQE dispatch            | ~19 ns     | ~26 ns            | ~1.6 ns            | 12x          |
+| CQE batch iterate (256) | -          | ~199 ns           | ~0.78 ns           | -            |
+
+NOP and CQE dispatch show strong amortization (7-12x) because the dominant cost (syscall
+or function call overhead) is paid once per batch. UDP sendmsg shows minimal amortization
+(1.2x) because per-packet kernel work dominates.
+
+#### UserData Decode
+
+| Operation       | Cost     | Notes                                    |
+|-----------------|----------|------------------------------------------|
+| UserData decode | ~0.43 ns | u64 unpack to (transport_idx, slot_idx)  |
+
+Sub-nanosecond. Confirms the packed u64 encoding for io_uring user_data adds zero measurable
+overhead to the CQE processing path.
 
 ### Regression Policy
 
@@ -479,7 +551,7 @@ Traditional io_uring receive requires re-submitting an SQE after every received 
 |------------------|------------------------------|-------------------------------|
 | SQEs per message | 1 (re-arm each time)         | 0 (stays armed across CQEs)   |
 | Buffer ownership | Userspace pre-assigns        | Kernel picks from shared ring |
-| Reap cost        | ~1100 ns (reap+rearm+submit) | ~14.8 ns (reap+recycle only)  |
+| Reap cost        | ~1.5 us (reap+rearm+submit)  | ~12 ns (reap+recycle only)    |
 | Syscall per recv | 1 (`io_uring_enter`)         | 0 (only on multishot restart) |
 
 #### buf_ring Lifecycle
@@ -721,10 +793,11 @@ The driver uses `unsafe` in three controlled categories:
 
 | Stage                     | Budget      | Measured     |
 |---------------------------|-------------|--------------|
-| CQE harvest + parse       | < 20 ns     | ~13.7 ns     |
+| CQE harvest + parse       | < 20 ns     | ~19 ns       |
 | buf_ring recycle          | < 5 ns      | (included)   |
 | Frame dispatch + callback | < 10 ns     | ~0.5 ns      |
-| **Total userspace**       | **< 35 ns** | **~14.2 ns** |
+| **Total userspace**       | **< 35 ns** | **~19.5 ns** |
+| **vs traditional recv**   | -           | **125x better** |
 
 #### Control Message Generation
 

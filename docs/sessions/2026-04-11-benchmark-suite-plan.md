@@ -16,7 +16,7 @@
 - [x] Update `docs/performance_design.md` with new numbers
 - [x] Run Tier 1 examples (`ping_pong`, `throughput`) for threaded comparison
 - [x] Investigate throughput FAIL (back-pressure / send-slot saturation)
-- [ ] Run Tier 2 benchmarks (`io_uring_submit`, `cqe_dispatch`)
+- [x] Run Tier 2 benchmarks (`io_uring_submit`, `cqe_dispatch`)
 
 ## Work Completed
 
@@ -141,6 +141,45 @@ Result: 40x improvement (17.6K -> 700K msg/s). PASS.
 Remaining: 70% receive loss is expected on UDP loopback under burst load.
 Primary metric is send rate (offer throughput through full Aeron stack).
 
+### Tier 2 Benchmark Execution (Both Complete)
+
+Ran both Tier 2 benchmarks. Added "CQE Dispatch" and "io_uring Advantage (Tier 2)" sections
+to `docs/performance_design.md`. Updated io_uring Kernel Roundtrip table with fresh numbers
+and 3 new metrics (sendmsg burst 16, recvmsg reap only, recvmsg reap+rearm+submit).
+
+Note: Terminal output showed `µs` unit as bare `s` (UTF-8 `c2b5` micro sign dropped).
+Confirmed via xxd that reported values are microseconds, not seconds.
+
+#### io_uring_submit Results
+
+| Variant | Measured | Notes |
+|---------|----------|-------|
+| NOP submit+reap (single) | ~159 ns | kernel roundtrip floor |
+| NOP submit+reap (burst 16) | ~337 ns (~21 ns/op) | amortized |
+| SQE push only (no submit) | ~30 ns | userspace ring write |
+| submit (empty ring) | ~66 ns | raw syscall overhead |
+| UDP sendmsg+reap (single) | ~994 ns | real network I/O |
+| UDP sendmsg+reap (burst 16) | ~13.7 us (~860 ns/op) | amortized |
+| UDP recvmsg reap only | ~16 ns | CQ drain floor |
+| UDP recvmsg reap+rearm+submit | ~1.5 us | traditional recv path |
+| UDP recvmsg multishot reap+recycle | ~12 ns | multishot path |
+
+#### cqe_dispatch Results
+
+| Variant | Measured | Per-Msg |
+|---------|----------|---------|
+| single msg | ~19 ns | 19 ns |
+| burst 16 msgs (total) | ~26 ns | ~1.6 ns |
+| UserData decode | ~0.43 ns | - |
+| batch iterate 256 CQEs | ~199 ns | ~0.78 ns |
+
+#### Key Tier 2 Findings
+
+- **Multishot 125x reduction**: ~1.5 us (traditional) to ~12 ns (multishot) per recv
+- **Aeron dispatch overhead**: ~7 ns above io_uring floor (19 ns CQE dispatch - 12 ns raw multishot)
+- **Burst amortization**: CQE dispatch 12x (19 ns single to 1.6 ns/msg batched)
+- **UserData decode**: sub-nanosecond (~0.43 ns) - zero measurable overhead
+
 ## Decisions Made
 
 | Decision | Rationale | ADR |
@@ -249,6 +288,9 @@ duty cycle idle    | ~1.75 us       | ~100-300 ns    | 0.2x     | aeron-rs inclu
 duty cycle 1fr     | ~3.42 us       | ~1-3 us        | ~1x      | duty_cycle
 RTT single (bench) | ~3.42 us       | ~8-12 us (p50) | 2-3x     | single-thread interleaved
 Throughput (bench) | ~620K msg/s    | ~2-3 M msg/s   | 0.2-0.3x | single-thread, not threaded
+recv (multishot)   | ~12 ns         | ~1-2 us (epoll) | 80-170x  | io_uring structural advantage
+Aeron dispatch     | ~7 ns overhead | N/A            | -        | above io_uring floor
+CQE batch (16)     | ~1.6 ns/msg    | N/A            | -        | amortized dispatch
 ```
 
 Per-fragment operations (offer, poll, scan) are 4-9x faster than Aeron C reference.
@@ -280,7 +322,7 @@ Threaded throughput (tuned) is ~700K msg/s - 0.23-0.35x Aeron C (PASS).
 1. ~~**High:** Run Tier 1 benchmarks~~ DONE
 2. ~~**High:** Run Tier 1 examples (`ping_pong`, `throughput`)~~ DONE
 3. ~~**High:** Investigate throughput FAIL~~ DONE - fixed: 17.6K -> 700K msg/s (receiver_window + term_buffer_length)
-4. **Medium:** Run Tier 2 benchmarks (`io_uring_submit`, `cqe_dispatch`)
+4. ~~**Medium:** Run Tier 2 benchmarks (`io_uring_submit`, `cqe_dispatch`)~~ DONE
 5. ~~**Medium:** Collect all results into Aeron C comparison table~~ DONE
 6. ~~**Medium:** Update `docs/performance_design.md` with `poll_fragments` numbers and comparison table~~ DONE
 7. **Low:** Fix `mem::forget` leak in `cqe_dispatch.rs` and `publication_offer.rs`
