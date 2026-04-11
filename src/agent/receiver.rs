@@ -174,6 +174,10 @@ struct ImageEntry {
     /// Timing.
     time_of_last_sm_ns: i64,
     time_of_last_nak_ns: i64,
+    /// Adaptive SM: set to true when data is received and send_sm_on_data is
+    /// enabled. Checked (and cleared) in send_control_messages alongside the
+    /// timer-based path. At most one SM per poll_data cycle per image.
+    sm_pending: bool,
     /// Whether this slot is active.
     active: bool,
 }
@@ -195,6 +199,7 @@ impl Default for ImageEntry {
             expected_term_offset: 0,
             time_of_last_sm_ns: 0,
             time_of_last_nak_ns: 0,
+            sm_pending: false,
             active: false,
         }
     }
@@ -218,6 +223,11 @@ pub struct ReceiverAgent {
     nak_delay_ns: i64,
     #[allow(dead_code)]
     default_receiver_window: i32,
+    /// Explicit receiver_window override from DriverContext. When Some, used
+    /// instead of the default `term_length / 2` in on_setup.
+    receiver_window_override: Option<i32>,
+    /// When true, set sm_pending on data receipt for immediate SM feedback.
+    send_sm_on_data: bool,
     receiver_id: i64,
     /// Pre-sized NAK accumulator - filled during poll_data, drained in
     /// send_control_messages. No allocation in duty cycle.
@@ -250,6 +260,8 @@ struct InlineHandler<'a> {
     nak_queue: &'a mut [PendingNak; MAX_PENDING_NAKS_PER_CYCLE],
     nak_queue_len: &'a mut usize,
     sub_bridge: &'a Option<Arc<SubscriptionBridge>>,
+    send_sm_on_data: bool,
+    receiver_window_override: Option<i32>,
 }
 
 impl<'a> DataFrameHandler for InlineHandler<'a> {
@@ -346,6 +358,10 @@ impl<'a> DataFrameHandler for InlineHandler<'a> {
                                 img.expected_term_offset = aligned_end;
                             }
                         }
+                        // Adaptive SM: flag for immediate SM in send_control_messages.
+                        if self.send_sm_on_data {
+                            img.sm_pending = true;
+                        }
                     }
                     Err(_) => {
                         // TermFull or InvalidPartition - frame does not fit.
@@ -413,11 +429,13 @@ impl<'a> DataFrameHandler for InlineHandler<'a> {
                 term_length: tl as u32,
                 consumption_term_id: setup.active_term_id,
                 consumption_term_offset: setup.term_offset,
-                receiver_window: setup.term_length / 2,
+                receiver_window: self.receiver_window_override
+                    .unwrap_or(setup.term_length / 2),
                 receiver_id: 0,
                 expected_term_offset: setup.term_offset,
                 time_of_last_sm_ns: 0,
                 time_of_last_nak_ns: 0,
+                sm_pending: false,
                 active: true,
             };
             self.image_handles[idx] = Some(recv_image);
@@ -468,6 +486,8 @@ impl ReceiverAgent {
             sm_interval_ns: ctx.sm_interval_ns,
             nak_delay_ns: ctx.nak_delay_ns,
             default_receiver_window: (ctx.mtu_length * 32) as i32,
+            receiver_window_override: ctx.receiver_window,
+            send_sm_on_data: ctx.send_sm_on_data,
             receiver_id: rand_receiver_id(),
             nak_queue: [unsafe { std::mem::zeroed() }; MAX_PENDING_NAKS_PER_CYCLE],
             nak_queue_len: 0,
@@ -484,6 +504,18 @@ impl ReceiverAgent {
         let idx = self.endpoints.len();
         self.endpoints.push(endpoint);
         Ok(idx)
+    }
+
+    /// Number of active images (sessions created via Setup handshake).
+    pub fn image_count(&self) -> usize {
+        self.image_count
+    }
+
+    /// Check whether an image exists for the given (session_id, stream_id).
+    pub fn has_image(&self, session_id: i32, stream_id: i32) -> bool {
+        find_image_in_index(
+            &self.images, &self.image_index, session_id, stream_id,
+        ).is_some()
     }
 
     /// Set the subscription bridge for delivering image handles to clients.
@@ -604,6 +636,8 @@ impl ReceiverAgent {
         let nak_queue = &mut self.nak_queue;
         let nak_queue_len = &mut self.nak_queue_len;
         let sub_bridge = &self.sub_bridge;
+        let send_sm_on_data = self.send_sm_on_data;
+        let receiver_window_override = self.receiver_window_override;
 
         let result = poller.poll_recv(|msg: RecvMessage<'_>| {
             let mut handler = InlineHandler {
@@ -617,6 +651,8 @@ impl ReceiverAgent {
                 nak_queue,
                 nak_queue_len,
                 sub_bridge,
+                send_sm_on_data,
+                receiver_window_override,
             };
             // O(1) dispatch: transport_idx maps 1:1 to endpoint index.
             if let Some(ep) = endpoints.get_mut(msg.transport_idx) {
@@ -643,8 +679,9 @@ impl ReceiverAgent {
                 continue;
             }
 
-            // Send SM if interval has elapsed.
-            if now_ns.wrapping_sub(img.time_of_last_sm_ns) > self.sm_interval_ns {
+            // Send SM if timer interval has elapsed OR adaptive sm_pending is set.
+            let timer_elapsed = now_ns.wrapping_sub(img.time_of_last_sm_ns) > self.sm_interval_ns;
+            if timer_elapsed || img.sm_pending {
                 let ep_idx = img.endpoint_idx;
                 let sm = PendingSm {
                     dest_addr: img.source_addr,
@@ -656,6 +693,18 @@ impl ReceiverAgent {
                     receiver_id: self.receiver_id,
                 };
                 img.time_of_last_sm_ns = now_ns;
+                img.sm_pending = false;
+
+                #[cfg(debug_assertions)]
+                tracing::debug!(
+                    session_id = img.session_id,
+                    stream_id = img.stream_id,
+                    consumption_term_id = img.consumption_term_id,
+                    consumption_term_offset = img.consumption_term_offset,
+                    receiver_window = img.receiver_window,
+                    adaptive = !timer_elapsed,
+                    "SM queued"
+                );
 
                 if let Some(ep) = self.endpoints.get_mut(ep_idx) {
                     ep.queue_sm(sm);
@@ -1037,6 +1086,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1071,6 +1122,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             // Not power-of-two.
             let setup = make_setup_header(1, 1, 0, 0, 100, 0);
@@ -1096,6 +1149,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             // Too small (< 32).
             let setup = make_setup_header(1, 1, 0, 0, 16, 0);
@@ -1120,6 +1175,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             for i in 0..5 {
                 let setup = make_setup_header(i, i, 0, 0, TEST_TERM_LENGTH as i32, 0);
@@ -1145,6 +1202,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             // Create image via setup.
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
@@ -1184,6 +1243,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1213,6 +1274,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1249,6 +1312,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1289,6 +1354,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             // Start at term 4, so terms 0-3 are all stale (>= PARTITION_COUNT behind).
             let setup = make_setup_header(
@@ -1328,6 +1395,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             // Start at term 2, initial 0.
             let setup = make_setup_header(42, 7, 0, 2, TEST_TERM_LENGTH as i32, 0);
@@ -1358,6 +1427,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1395,11 +1466,13 @@ mod tests {
                 nak_delay_ns: 0,     // no coalescing delay
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
 
-            // Frame at offset 0 (32 bytes aligned).
+            // Frame at offset 0 (32 bytes, aligned to 32).
             let dh0 = make_data_header(42, 7, 0, 0, 0);
             handler.on_data(&dh0, &[], &source);
 
@@ -1432,6 +1505,8 @@ mod tests {
                 nak_delay_ns: 0,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1464,6 +1539,8 @@ mod tests {
                 nak_delay_ns: 60_000_000, // 60ms coalescing
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1493,6 +1570,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             // Another gap at different offset (skip 96, send at 128).
             let dh4 = make_data_header(42, 7, 0, 128, 0);
@@ -1517,6 +1596,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1544,6 +1625,8 @@ mod tests {
                 nak_delay_ns: 60_000_000,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             // Another gap (skip 96, send at 128).
             let dh4 = make_data_header(42, 7, 0, 128, 0);
@@ -1568,6 +1651,8 @@ mod tests {
                 nak_delay_ns: 0,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             // Start at term 1 with some data already consumed.
             let setup = make_setup_header(42, 7, 0, 1, TEST_TERM_LENGTH as i32, 0);
@@ -1607,6 +1692,8 @@ mod tests {
                 nak_delay_ns: 0,
                 nak_queue: &mut nq,
                 nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
             };
             let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
             handler.on_setup(&setup, &source);
@@ -1620,5 +1707,222 @@ mod tests {
 
         // Queue length should not exceed capacity.
         assert_eq!(nql, MAX_PENDING_NAKS_PER_CYCLE, "queue should not grow past capacity");
+    }
+
+    // ── Adaptive SM: sm_pending flag ──
+
+    #[test]
+    fn on_data_sets_sm_pending_when_enabled() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: true, // adaptive SM enabled
+                receiver_window_override: None,
+            };
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+        }
+        // sm_pending starts false after setup.
+        assert!(!images[0].sm_pending, "sm_pending should start false");
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: true,
+                receiver_window_override: None,
+            };
+            // on_data should set sm_pending = true.
+            let dh = make_data_header(42, 7, 0, 0, 0);
+            handler.on_data(&dh, &[], &source);
+        }
+        assert!(images[0].sm_pending, "sm_pending should be true after on_data with send_sm_on_data=true");
+    }
+
+    #[test]
+    fn on_data_does_not_set_sm_pending_when_disabled() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false, // adaptive SM disabled
+                receiver_window_override: None,
+            };
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+
+            let dh = make_data_header(42, 7, 0, 0, 0);
+            handler.on_data(&dh, &[], &source);
+        }
+        assert!(!images[0].sm_pending, "sm_pending should stay false when send_sm_on_data=false");
+    }
+
+    // ── Consumption position tracking ──
+
+    #[test]
+    fn consumption_position_correct_after_three_sequential_frames() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
+            };
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+
+            // Three header-only frames at sequential offsets: 0, 32, 64.
+            // Each frame is 32 bytes (DATA_HEADER_LENGTH), aligned to 32.
+            for i in 0..3 {
+                let offset = i * 32;
+                let dh = make_data_header(42, 7, 0, offset, 0);
+                handler.on_data(&dh, &[], &source);
+            }
+        }
+        // After 3 frames: consumption should be at 3 * 32 = 96.
+        assert_eq!(images[0].consumption_term_id, 0);
+        assert_eq!(images[0].consumption_term_offset, 96);
+        assert_eq!(images[0].expected_term_offset, 96);
+    }
+
+    #[test]
+    fn consumption_position_does_not_regress_on_duplicate() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
+            };
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+
+            // Write frame at offset 0.
+            let dh0 = make_data_header(42, 7, 0, 0, 0);
+            handler.on_data(&dh0, &[], &source);
+
+            // Write frame at offset 32.
+            let dh1 = make_data_header(42, 7, 0, 32, 0);
+            handler.on_data(&dh1, &[], &source);
+
+            // Re-deliver frame at offset 0 (duplicate/retransmit).
+            // Consumption must NOT regress.
+            let dh0_dup = make_data_header(42, 7, 0, 0, 0);
+            handler.on_data(&dh0_dup, &[], &source);
+        }
+        // After 2 sequential frames (offset 0, 32) consumption should be 64.
+        // Duplicate at offset 0 must not regress it.
+        assert_eq!(
+            images[0].consumption_term_offset, 64,
+            "consumption should not regress on duplicate frame"
+        );
+    }
+
+    // ── receiver_window_override ──
+
+    #[test]
+    fn receiver_window_uses_override_when_set() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: Some(8192),
+            };
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+        }
+        assert_eq!(
+            images[0].receiver_window, 8192,
+            "receiver_window should use override value"
+        );
+    }
+
+    #[test]
+    fn receiver_window_uses_default_when_no_override() {
+        let (mut images, mut count, mut index, mut handles, mut nq, mut nql, sub_bridge) = make_handler_parts();
+        let source = zeroed_source();
+        {
+            let mut handler = InlineHandler {
+                images: &mut images,
+                image_count: &mut count,
+                image_index: &mut index,
+                image_handles: handles.as_mut_slice(),
+                sub_bridge: &sub_bridge,
+                max_images: MAX_IMAGES,
+                now_ns: 0,
+                nak_delay_ns: 60_000_000,
+                nak_queue: &mut nq,
+                nak_queue_len: &mut nql,
+                send_sm_on_data: false,
+                receiver_window_override: None,
+            };
+            // term_length = 1024, default = term_length / 2 = 512.
+            let setup = make_setup_header(42, 7, 0, 0, TEST_TERM_LENGTH as i32, 0);
+            handler.on_setup(&setup, &source);
+        }
+        assert_eq!(
+            images[0].receiver_window,
+            TEST_TERM_LENGTH as i32 / 2,
+            "receiver_window should default to term_length / 2"
+        );
     }
 }

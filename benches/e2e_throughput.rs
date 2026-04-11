@@ -50,6 +50,12 @@ const DRAIN_CYCLES: usize = 128;
 
 /// Build a DriverContext tuned for benchmark throughput.
 /// Fast timers ensure the Setup/SM handshake completes quickly during warmup.
+/// - sm_interval_ns = 0: receiver sends SM as soon as timer check passes
+///   (every do_work cycle that has active images).
+/// - send_sm_on_data = true: receiver queues SM immediately after processing
+///   data frames, eliminating the SM-gated stall.
+/// - receiver_window covers full 4-partition buffer so sender_limit never
+///   stalls within a single batch.
 fn make_bench_ctx() -> DriverContext {
     DriverContext {
         uring_ring_size: 256,
@@ -61,7 +67,13 @@ fn make_bench_ctx() -> DriverContext {
         send_duty_cycle_ratio: 1,
         // Fast timers for warmup handshake.
         heartbeat_interval_ns: Duration::from_millis(1).as_nanos() as i64,
-        sm_interval_ns: Duration::from_millis(1).as_nanos() as i64,
+        // Zero interval: SM eligible on every send_control_messages call.
+        sm_interval_ns: 0,
+        // Adaptive SM: queue SM immediately on data receipt.
+        send_sm_on_data: true,
+        // Large receiver_window: covers full 4-partition buffer so a single
+        // SM advances sender_limit enough for the entire batch.
+        receiver_window: Some(BENCH_TERM_LENGTH as i32 * 4),
         ..DriverContext::default()
     }
 }

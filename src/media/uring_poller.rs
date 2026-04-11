@@ -403,6 +403,14 @@ impl UringTransportPoller {
             tracing::warn!(recovered, "recovered leaked send slots after CQ overflow");
         }
     }
+
+    /// Number of free send slots available for submission.
+    /// O(1), no allocation. Used to clamp sender_scan limit so frames are
+    /// not silently dropped when send slots are exhausted.
+    #[inline]
+    pub fn send_available(&self) -> usize {
+        self.pool.send_available()
+    }
 }
 
 /// Maximum CQEs to harvest per poll cycle. CQEs beyond this stay in the

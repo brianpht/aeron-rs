@@ -482,6 +482,28 @@ impl SenderAgent {
         }
     }
 
+    /// Current sender_limit (flow control ceiling) for the given publication.
+    ///
+    /// Returns `None` if the index is out of bounds.
+    pub fn publication_sender_limit(&self, idx: usize) -> Option<i64> {
+        self.publications.get(idx).map(|p| p.sender_limit())
+    }
+
+    /// Whether the publication still needs a Setup/SM handshake to complete.
+    ///
+    /// Returns `None` if the index is out of bounds.
+    pub fn publication_needs_setup(&self, idx: usize) -> Option<bool> {
+        self.publications.get(idx).map(|p| p.needs_setup())
+    }
+
+    /// Smoothed RTT (SRTT) in nanoseconds for the given publication.
+    /// Returns 0 if no RTTM reply has been processed yet.
+    ///
+    /// Returns `None` if the index is out of bounds.
+    pub fn publication_last_rtt_ns(&self, idx: usize) -> Option<i64> {
+        self.publications.get(idx).map(|p| p.last_rtt_ns())
+    }
+
     // ── Internal duty-cycle steps ──
 
     fn do_send(&mut self, now_ns: i64) -> i32 {
@@ -578,7 +600,8 @@ impl SenderAgent {
 
             // Phase 3: Scan committed frames and send via endpoint.
             // Uses enum dispatch for sender_scan (no dyn).
-            // Flow control: clamp scan to available receiver window.
+            // Flow control: clamp scan to available receiver window AND
+            // available send slots (prevents silent frame drops).
             {
                 let dest = dest_addr_copy.as_ref();
                 let pub_entry = &mut publications[idx];
@@ -586,17 +609,43 @@ impl SenderAgent {
 
                 let sender_lim = pub_entry.sender_limit();
                 let sender_pos = pub_entry.sender_position();
-                let available = sender_lim.wrapping_sub(sender_pos);
+                let pub_pos = pub_entry.pub_position();
+
+                // Scan limit = min(flow-control window, committed data).
+                //
+                // sender_limit gates how far *ahead* the receiver allows.
+                // pub_position gates how far *data* the publisher has written.
+                // Both use wrapping half-range comparison against sender_pos.
+                // Without the pub_position clamp, sender_scan reads stale
+                // frame_length fields from prior term cycles, advancing
+                // sender_position past the actual published data.
+                let window_avail = sender_lim.wrapping_sub(sender_pos);
+                let data_avail = pub_pos.wrapping_sub(sender_pos);
+
+                let available = if window_avail <= 0 || data_avail <= 0 {
+                    0
+                } else {
+                    window_avail.min(data_avail)
+                };
 
                 // Use full available window (not capped at MTU) so the
                 // sender can scan multiple frames per do_work() cycle.
-                let limit = if available <= 0 {
-                    0
-                } else if available > u32::MAX as i64 {
+                let mut limit = if available > u32::MAX as i64 {
                     u32::MAX
                 } else {
                     available as u32
                 };
+
+                // Clamp by send slot availability: each scanned frame
+                // consumes one send slot. send_available * mtu is an upper
+                // bound on bytes we can transmit. This prevents sender_scan
+                // from advancing sender_position past frames that cannot be
+                // sent (silent data loss).
+                let send_slots = poller.send_available();
+                let slot_limit = (send_slots as u64).saturating_mul(mtu_val as u64);
+                if slot_limit < limit as u64 {
+                    limit = slot_limit as u32;
+                }
 
                 if limit > 0 {
                     let scanned = pub_entry.sender_scan(limit, |_off, data| {
@@ -616,6 +665,20 @@ impl SenderAgent {
                         pub_entry.set_time_of_last_send_ns(now_ns);
                     }
                     total_bytes = total_bytes.wrapping_add(scanned as i32);
+
+                    #[cfg(debug_assertions)]
+                    if scanned > 0 {
+                        tracing::debug!(
+                            session_id,
+                            stream_id,
+                            sender_limit = sender_lim,
+                            sender_position = pub_entry.sender_position(),
+                            pub_position = pub_entry.pub_position(),
+                            scanned,
+                            send_slots,
+                            "sender scan"
+                        );
+                    }
                 }
             }
 

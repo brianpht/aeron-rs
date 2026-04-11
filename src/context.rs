@@ -19,8 +19,8 @@ pub enum ContextValidationError {
     MtuOutOfRange,
     /// `heartbeat_interval_ns` must be > 0.
     HeartbeatIntervalZero,
-    /// `sm_interval_ns` must be > 0.
-    SmIntervalZero,
+    /// `sm_interval_ns` must be >= 0.
+    SmIntervalNegative,
     /// `nak_delay_ns` must be > 0.
     NakDelayZero,
     /// `timer_interval_ns` must be > 0.
@@ -57,7 +57,7 @@ impl std::fmt::Display for ContextValidationError {
             Self::SendSlotsZero => f.write_str("uring_send_slots must be > 0"),
             Self::MtuOutOfRange => write!(f, "mtu_length must be in [64, {MAX_RECV_BUFFER}]"),
             Self::HeartbeatIntervalZero => f.write_str("heartbeat_interval_ns must be > 0"),
-            Self::SmIntervalZero => f.write_str("sm_interval_ns must be > 0"),
+            Self::SmIntervalNegative => f.write_str("sm_interval_ns must be >= 0"),
             Self::NakDelayZero => f.write_str("nak_delay_ns must be > 0"),
             Self::TimerIntervalZero => f.write_str("timer_interval_ns must be > 0"),
             Self::SocketRcvbufZero => f.write_str("socket_rcvbuf must be > 0"),
@@ -119,6 +119,14 @@ pub struct DriverContext {
     /// Bounds memory: each image allocates a RawLog (4 * term_length bytes).
     /// Must be in [1, 256]. Default: 256.
     pub max_receiver_images: usize,
+    /// Override for the receiver window advertised in SM (bytes).
+    /// When `None`, uses the sender's `term_length / 2` (Aeron C default).
+    /// Set explicitly to cover larger batches or reduce SM round-trips.
+    pub receiver_window: Option<i32>,
+    /// When `true`, the receiver queues an SM immediately after processing
+    /// data frames (in addition to the timer-based path). Mirrors Aeron C
+    /// `SEND_SM_ON_DATA` behaviour. Default: `false`.
+    pub send_sm_on_data: bool,
 
     // ── General ──
     pub driver_timeout_ns: i64,
@@ -161,6 +169,8 @@ impl Default for DriverContext {
             nak_delay_ns: Duration::from_millis(60).as_nanos() as i64,
             rttm_interval_ns: Duration::from_secs(1).as_nanos() as i64,
             max_receiver_images: 256,
+            receiver_window: None,
+            send_sm_on_data: false,
 
             driver_timeout_ns: Duration::from_secs(10).as_nanos() as i64,
             timer_interval_ns: Duration::from_millis(1).as_nanos() as i64,
@@ -201,8 +211,8 @@ impl DriverContext {
         if self.heartbeat_interval_ns <= 0 {
             return Err(ContextValidationError::HeartbeatIntervalZero);
         }
-        if self.sm_interval_ns <= 0 {
-            return Err(ContextValidationError::SmIntervalZero);
+        if self.sm_interval_ns < 0 {
+            return Err(ContextValidationError::SmIntervalNegative);
         }
         if self.nak_delay_ns <= 0 {
             return Err(ContextValidationError::NakDelayZero);
@@ -380,10 +390,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_sm_interval_zero() {
+    fn validate_sm_interval_zero_is_ok() {
         let mut ctx = DriverContext::default();
         ctx.sm_interval_ns = 0;
-        assert_eq!(ctx.validate(), Err(ContextValidationError::SmIntervalZero));
+        assert!(ctx.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_sm_interval_negative() {
+        let mut ctx = DriverContext::default();
+        ctx.sm_interval_ns = -1;
+        assert_eq!(ctx.validate(), Err(ContextValidationError::SmIntervalNegative));
     }
 
     #[test]

@@ -10,7 +10,7 @@
 - [x] Identify why the e2e_throughput benchmark stalls at Criterion "Warming up" phase
 - [x] Map all flow control interactions between SenderAgent and ReceiverAgent
 - [x] Quantify send slot, buf_ring, and SM timing interactions
-- [ ] Implement fix (deferred - analysis only)
+- [x] Implement fix (all 5 next steps completed)
 
 ## Work Completed
 
@@ -153,40 +153,66 @@ comparison), but means SM interval tracking is purely per-agent.
 | Send slots consumed per burst | 16 | Well under 128 limit |
 | Buf ring entries consumed per burst | 16 | Well under 64 limit |
 
+### Fix Results
+
+All 5 fixes applied. Updated `make_bench_ctx()` parameters:
+
+| Parameter | Before (stall) | After (fix) |
+|-----------|----------------|-------------|
+| `sm_interval_ns` | 1,000,000 (1ms) | 0 (every duty cycle) |
+| `send_sm_on_data` | false | true (adaptive SM on data receipt) |
+| `receiver_window` | `term_length / 2` (131,072) | `Some(TERM_LENGTH * 4)` (1,048,576) |
+| sender_scan clamping | none (silent drop risk) | `send_available() * mtu` |
+| debug tracing | none | `#[cfg(debug_assertions)] tracing::debug!` |
+
+**Benchmark result after fix:** 632K msgs/s, 842 MiB/s, ~1.58ms per iteration (1000 x 1408B frames on loopback, single-threaded interleaved).
+
 ## Decisions Made
 
 | Decision | Rationale | ADR |
 |----------|-----------|-----|
-| Reduce sm_interval_ns in bench context | 1ms interval is the primary throughput bottleneck in single-threaded mode. Reducing to 1us or 0 eliminates the SM-gated stall | N/A |
-| Consider larger initial sender_limit | `term_length` is conservative. Aeron C uses `initial_window_length` which can be multiple terms. Larger initial window defers the first SM stall | N/A |
-| Do not change receiver_window formula yet | `term_length / 2` matches Aeron C default. Changing it would affect protocol compatibility | N/A |
-| Address silent send_data errors separately | Not the cause of the hang but a correctness risk. Track in a separate issue | N/A |
+| Allow `sm_interval_ns = 0` in validation | 1ms interval is the primary throughput bottleneck in single-threaded mode. Zero eliminates the SM-gated stall. Renamed `SmIntervalZero` to `SmIntervalNegative`, validation changed from `<= 0` to `< 0` | N/A |
+| Add `DriverContext::receiver_window` override | Bench uses `Some(BENCH_TERM_LENGTH * 4)` to cover the full 4-partition buffer. Default `term_length / 2` unchanged for protocol compatibility | N/A |
+| Add adaptive SM (`send_sm_on_data`) | Mirrors Aeron C `SEND_SM_ON_DATA`. Sets `sm_pending = true` on data receipt, checked alongside timer in `send_control_messages`. At most one SM per `poll_data` cycle per image | N/A |
+| Clamp sender_scan by send slot availability | `send_available() * mtu` caps scan limit. Prevents `sender_position` from advancing past frames that cannot be transmitted (silent data loss) | N/A |
+| Add debug tracing for flow control | `#[cfg(debug_assertions)] tracing::debug!` in `do_send` (sender_limit, sender_position, scanned, send_slots) and `send_control_messages` (SM queued, adaptive flag) | N/A |
 
 ## Tests Added/Modified
 
 | Test File | Test Name | Type | Status |
 |-----------|-----------|------|--------|
-| N/A | N/A | N/A | Analysis only - no code changes |
+| `src/context.rs` | `validate_sm_interval_zero_is_ok` | Unit | Done |
+| `src/context.rs` | `validate_sm_interval_negative` | Unit | Done |
+| `tests/protocol_handshake.rs` | `setup_creates_image` | Integration | Done |
+| `tests/protocol_handshake.rs` | `sm_updates_sender_limit` | Integration | Done |
+| `tests/protocol_handshake.rs` | `rttm_request_reply_updates_srtt` | Integration | Done |
+| `tests/protocol_handshake.rs` | `heartbeat_keeps_session_alive` | Integration | Done |
 
 ## Issues Encountered
 
 | Issue | Resolution | Blocking |
 |-------|------------|----------|
-| Benchmark stalls ~1ms per SM round, ~9ms per iteration | Root cause identified: SM interval gates flow control in single-threaded model | Yes - benchmark unusable at current throughput |
-| Silent send_data errors in sender_scan | `let _ = ep.send_data(...)` drops frames without signaling. Not triggered in current bench but risky | No - separate fix needed |
-| First SM never advances sender_limit | `proposed = 0 + 131,072 < initial 262,144`. Only matters for the first term, subsequent SMs do advance | No - self-correcting after phase 4 |
+| Benchmark stalls ~1ms per SM round, ~9ms per iteration | **Resolved:** `sm_interval_ns: 0` + `send_sm_on_data: true` + `receiver_window: Some(TERM_LENGTH * 4)`. Iteration time reduced from ~9ms (hang) to ~1.58ms (632K msgs/s) | No - resolved |
+| Silent send_data errors in sender_scan | **Resolved:** Added `send_available()` to `UringTransportPoller`, scan limit clamped by `send_available * mtu` in `do_send` | No - resolved |
+| First SM never advances sender_limit | **Resolved:** `receiver_window: Some(TERM_LENGTH * 4)` makes first SM propose `0 + 1,048,576 > 262,144`, advancing sender_limit immediately | No - resolved |
 
 ## Next Steps
 
-1. **High:** Fix `sm_interval_ns` in bench context - set to 0 or 1,000 (1us) to eliminate SM-gated stall. Alternatively, send SM on every `receiver.do_work()` call when data has been received.
-2. **High:** Increase `receiver_window` or `sender_limit` initialization to cover the full BATCH_SIZE in the bench context, so the sender never stalls waiting for SM during a single iteration.
-3. **Medium:** Fix silent `send_data` errors - return error count from `sender_scan` emit closure, or cap scan limit to available send slots before scanning.
-4. **Medium:** Add sender_limit / sender_position / SM_count tracing under `cfg(debug_assertions)` so flow control stalls are visible during development.
-5. **Low:** Consider adaptive SM - receiver sends SM immediately after processing data (Aeron C `SEND_SM_ON_DATA`) in addition to the timer-based path.
+1. ~~**High:** Fix `sm_interval_ns` in bench context~~ **Done** - validation allows 0, bench uses `sm_interval_ns: 0`
+2. ~~**High:** Increase `receiver_window` or `sender_limit` initialization~~ **Done** - added `DriverContext::receiver_window: Option<i32>`, bench uses `Some(BENCH_TERM_LENGTH * 4)`
+3. ~~**Medium:** Fix silent `send_data` errors~~ **Done** - added `send_available()` to `UringTransportPoller`, scan limit clamped by `send_available * mtu`
+4. ~~**Medium:** Add sender_limit / sender_position / SM_count tracing~~ **Done** - `#[cfg(debug_assertions)]` `tracing::debug!` in `do_send` and `send_control_messages`
+5. ~~**Low:** Consider adaptive SM~~ **Done** - added `DriverContext::send_sm_on_data`, `ImageEntry::sm_pending`, receiver queues SM immediately after data receipt
 
 ## Files Changed
 
-| Status | File |
-|--------|------|
-| A | `docs/sessions/2026-04-10-e2e-bench-interaction-analysis.md` |
+| Status | File | Changes |
+|--------|------|---------|
+| M | `src/context.rs` | `SmIntervalZero` renamed to `SmIntervalNegative`, validation `< 0`, added `receiver_window: Option<i32>`, `send_sm_on_data: bool` |
+| M | `src/agent/receiver.rs` | Added `sm_pending` to `ImageEntry`, `receiver_window_override`/`send_sm_on_data` to agent+handler, `image_count()`/`has_image()` accessors |
+| M | `src/agent/sender.rs` | Scan clamped by `send_available * mtu`, debug tracing, `publication_sender_limit()`/`publication_needs_setup()`/`publication_last_rtt_ns()` accessors |
+| M | `src/media/uring_poller.rs` | Added `send_available()` delegating to `SlotPool` |
+| M | `benches/e2e_throughput.rs` | `sm_interval_ns: 0`, `send_sm_on_data: true`, `receiver_window: Some(TERM_LENGTH * 4)` |
+| A | `tests/protocol_handshake.rs` | 4 integration tests validating Setup/SM/RTTM/heartbeat lifecycle |
+| A | `docs/sessions/2026-04-10-e2e-bench-interaction-analysis.md` | This file |
 
