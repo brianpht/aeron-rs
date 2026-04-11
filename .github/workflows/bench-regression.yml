@@ -1,0 +1,131 @@
+# CI benchmark regression gate.
+#
+# On push to master: run all Criterion benchmarks and save as baseline.
+# On pull_request: run benchmarks, compare against master baseline with
+# critcmp, and fail if any benchmark regresses by more than 10%.
+#
+# Requires: Linux (io_uring), stable Rust, critcmp.
+
+name: Benchmark Regression
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            bench-${{ runner.os }}-
+
+      - name: Install critcmp
+        run: cargo install critcmp --locked
+
+      # ---- Baseline restore (PR only) ----
+      - name: Restore master baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion-baseline
+          key: criterion-baseline-master
+          restore-keys: criterion-baseline-master
+
+      # ---- Run benchmarks ----
+      #
+      # Fast group: pure computation, low variance, always gated.
+      # Slow group: e2e (io_uring + UDP loopback), higher variance, advisory on PR.
+      #
+      # Split into two steps so the fast gate gives early signal.
+
+      - name: Run fast benchmarks
+        run: |
+          for bench in frame_parse clock slot_pool loss_recovery retransmit publication_offer; do
+            cargo bench --bench "$bench" -- --save-baseline current
+          done
+
+      - name: Run slow benchmarks (e2e + io_uring)
+        run: |
+          for bench in cqe_dispatch io_uring_submit e2e_throughput e2e_latency duty_cycle; do
+            cargo bench --bench "$bench" -- --save-baseline current
+          done
+
+      # ---- Save baseline (master push only) ----
+      - name: Copy baseline for cache
+        if: github.event_name == 'push'
+        run: |
+          rm -rf target/criterion-baseline
+          mkdir -p target/criterion-baseline
+          # Copy only the saved baseline data (estimates.json files)
+          find target/criterion -name "estimates.json" -path "*/current/*" | while read f; do
+            dest="target/criterion-baseline/${f#target/criterion/}"
+            mkdir -p "$(dirname "$dest")"
+            cp "$f" "$dest"
+          done
+
+      - name: Save master baseline to cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion-baseline
+          key: criterion-baseline-master-${{ github.sha }}
+
+      # ---- Compare (PR only) ----
+      - name: Prepare master baseline for critcmp
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ ! -d target/criterion-baseline ] || [ -z "$(ls -A target/criterion-baseline 2>/dev/null)" ]; then
+            echo "::warning::No master baseline found - skipping regression check (first run?)"
+            echo "SKIP_COMPARISON=true" >> "$GITHUB_ENV"
+          else
+            # Overlay baseline data as the "master" baseline inside criterion/
+            find target/criterion-baseline -name "estimates.json" | while read f; do
+              rel="${f#target/criterion-baseline/}"
+              # Replace "current" segment with "master" for the baseline name
+              dest="target/criterion/$(echo "$rel" | sed 's|/current/|/master/|')"
+              mkdir -p "$(dirname "$dest")"
+              cp "$f" "$dest"
+            done
+          fi
+
+      - name: Compare with critcmp
+        if: github.event_name == 'pull_request' && env.SKIP_COMPARISON != 'true'
+        run: |
+          echo "## Benchmark comparison: master vs PR"
+          echo ""
+          critcmp master current || true
+          echo ""
+          critcmp master current --export > comparison.json
+
+      - name: Check for regressions (> 10%)
+        if: github.event_name == 'pull_request' && env.SKIP_COMPARISON != 'true'
+        run: bash .github/scripts/check-bench-regression.sh comparison.json 10
+
+      # ---- Summary ----
+      - name: Upload comparison artifact
+        if: github.event_name == 'pull_request' && env.SKIP_COMPARISON != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-comparison
+          path: comparison.json
+          retention-days: 30
+

@@ -302,11 +302,45 @@ fn bench_e2e_latency_minimal(c: &mut Criterion) {
     group.finish();
 }
 
+/// Small-payload RTT benchmark: 64-byte payload.
+///
+/// Exercises a different frame alignment and term-fill cadence than the
+/// full MTU benchmark. With DATA_HEADER_LENGTH=32 + 64 = 96 bytes raw,
+/// aligned to 128 bytes per frame (4x FRAME_ALIGNMENT). This produces
+/// more frames per term before rotation, stressing the receiver's
+/// consumption tracking at a higher frame rate than full-MTU.
+fn bench_e2e_latency_small(c: &mut Criterion) {
+    let (mut sender, mut receiver, pub_idx) = setup_agents();
+    let payload = [0xABu8; 64];
+
+    let mut group = c.benchmark_group("e2e_latency_small");
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(5));
+
+    group.bench_function("small_64B_rtt", |b| {
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                run_one_rtt(
+                    &mut sender,
+                    &mut receiver,
+                    pub_idx,
+                    &payload,
+                );
+            }
+            start.elapsed()
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_e2e_latency,
     bench_e2e_latency_batch,
     bench_e2e_latency_minimal,
+    bench_e2e_latency_small,
 );
 criterion_main!(benches);
 
