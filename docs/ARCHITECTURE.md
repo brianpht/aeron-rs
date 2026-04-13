@@ -28,6 +28,8 @@
 - [18. Dependency Map](#18-dependency-map)
 - [19. File Inventory](#19-file-inventory)
 - [20. Status and Gaps](#20-status-and-gaps)
+- [21. Configuration Tuning](#21-configuration-tuning)
+- [21. Configuration Tuning](#21-configuration-tuning)
 
 ---
 
@@ -982,4 +984,20 @@ flowchart TD
 - [ ] **epoll fallback** - io_uring only (no older kernel support)
 - [ ] **File-backed CnC** - currently anonymous mmap (in-process only)
 - [ ] **Inter-process client** - requires file-backed CnC + shared memory logs
+
+---
+
+## 21. Configuration Tuning
+
+The `DriverContext` struct exposes ~25 parameters that control socket buffers, io_uring sizing, sender/receiver timing,
+idle strategy, and general behavior. Two pre-built tuning profiles are documented for common use cases:
+
+| Profile | Goal | Key Changes | Expected Result |
+|---------|------|-------------|-----------------|
+| **Low-Latency** | Minimize RTT | `send_duty_cycle_ratio: 1`, `send_sm_on_data: true`, aggressive idle (100 spins, 10 us max park) | p50 ~5.8 us, p99 ~10.7 us |
+| **High-Throughput** | Maximize msg/s | `uring_send_slots: 1024`, `term_buffer_length: 256 KiB`, `receiver_window: 256 KiB`, 4 MiB socket buffers | ~700K msg/s send rate |
+| **SQPOLL** | Zero syscalls | `uring_sqpoll: true` (apply on top of either profile) | Eliminates ~66 ns io_uring_enter per flush |
+
+For complete profiles with code snippets, parameter-by-parameter rationale, sizing formulas, trade-off analysis,
+and Linux kernel tuning guidance, see [Configuration Tuning Guide](configuration_tuning.md).
 

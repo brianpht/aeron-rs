@@ -270,6 +270,17 @@ let ctx = DriverContext {
 };
 ```
 
+### Tuning Profiles
+
+Two ready-to-use profiles with copy-paste `DriverContext` snippets:
+
+| Profile | Key Knobs | Result |
+|---------|-----------|--------|
+| **Low-Latency** | `send_duty_cycle_ratio: 1`, `send_sm_on_data: true`, aggressive idle (100 spins, 10 us max park) | p50 ~5.8 us RTT |
+| **High-Throughput** | `uring_send_slots: 1024`, `term_buffer_length: 256 KiB`, `receiver_window: 256 KiB`, 4 MiB socket buffers | ~700K msg/s |
+
+See [docs/configuration_tuning.md](docs/configuration_tuning.md) for parameter-by-parameter rationale, sizing formulas, trade-off analysis, SQPOLL sub-profile, and Linux kernel tuning guidance.
+
 ## Wire Protocol
 
 Aeron wire format - little-endian, fixed-size headers, zero-copy parsed via `repr(C, packed)` overlay:
@@ -402,7 +413,7 @@ This driver is built with deterministic, low-latency performance as a core desig
 - **Little-endian wire format**: `repr(C, packed)` overlay parsing - zero byte-swap on x86_64
 - **Subscriber gap-skip**: Forward scan past unrecoverable gaps in poll_fragments (ADR-002)
 
-For detailed performance design principles, architecture decisions, and optimization guidelines, see [docs/performance_design.md](docs/performance_design.md). For the full architecture overview, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For detailed performance design principles, architecture decisions, and optimization guidelines, see [docs/performance_design.md](docs/performance_design.md). For the full architecture overview, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For tuning profiles (latency vs throughput), see [docs/configuration_tuning.md](docs/configuration_tuning.md).
 
 ## Examples
 
