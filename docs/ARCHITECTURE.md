@@ -133,6 +133,7 @@ src/
     term_buffer.rs          - RawLog + SharedLogBuffer (4-partition term buffer)
     network_publication.rs  - NetworkPublication (single-thread offer/scan)
     concurrent_publication.rs - ConcurrentPublication + SenderPublication (cross-thread)
+    shared_image.rs         - SharedImage (cross-thread recv->subscriber, atomic commit)
     send_channel_endpoint.rs  - SendChannelEndpoint (send data/heartbeat/setup/RTTM)
     receive_channel_endpoint.rs - ReceiveChannelEndpoint (receive data, send SM/NAK)
     retransmit_handler.rs   - RetransmitHandler (NAK-driven delay/linger state machine)
@@ -149,8 +150,9 @@ src/
     media_driver.rs         - MediaDriver (orchestrator, launches 3 agent threads)
     aeron.rs                - Aeron client (add_publication, add_subscription, heartbeat)
     bridge.rs               - PublicationBridge (lock-free SPSC slot transfer)
+    sub_bridge.rs           - SubscriptionBridge + RecvEndpointBridge (lock-free SPSC)
     publication.rs          - Publication (user-facing offer handle)
-    subscription.rs         - Subscription (user-facing poll handle, data path stubbed)
+    subscription.rs         - Subscription (poll via SharedImage, gap-skip, pad-skip)
 ```
 
 ---
@@ -667,12 +669,40 @@ stateDiagram-v2
 Wraps `ConcurrentPublication`. Enforces single-publisher via `&mut self` on `offer()`. Not Clone. Send but not Sync.
 Channel URI stored in inline `[u8; 256]` buffer (no String allocation).
 
-### Subscription (stubbed)
+### Subscription (data path via SharedImage)
 
-**File:** `client/subscription.rs` (94 lines)
+**File:** `client/subscription.rs` (187 lines)
 
-Registration works via CnC. Data path (`poll()`) requires shared-memory image buffers between receiver agent and
-client - not yet implemented. Currently returns 0.
+Registration works via CnC. Data delivery via `SharedImage` buffers shared between receiver agent and client thread:
+
+- `SubscriptionBridge` (lock-free SPSC) transfers `SubscriberImage` handles from receiver to client
+- `poll()` drains bridge for new images matching `stream_id`, removes closed images, round-robin polls each image
+- `SubscriberImage::poll_fragments()` walks committed frames via Acquire loads on `frame_length`
+- Gap-skip (ADR-002): detects unrecoverable gaps via `receiver_position`, scans forward to next committed frame
+- Pad frame skip: silently advances past term-boundary padding
+
+```mermaid
+sequenceDiagram
+    participant RA as ReceiverAgent
+    participant SLB as SharedLogBuffer (Arc)
+    participant Sub as Subscription::poll
+    participant App as Application
+
+    RA ->> SLB: append_frame (Release frame_length)
+    RA ->> SLB: advance receiver_position (Release)
+    App ->> Sub: poll(handler, limit)
+    Sub ->> SLB: load frame_length (Acquire)
+    Sub ->> App: handler(payload, session_id, stream_id)
+    Sub ->> SLB: advance subscriber_position (Release)
+```
+
+### SubscriptionBridge
+
+**File:** `client/sub_bridge.rs` (404 lines)
+
+Lock-free SPSC transfer of `SubscriberImage` handles from receiver to client. 32 pre-allocated slots.
+Same `AtomicU8` state machine as `PublicationBridge` (`EMPTY -> FILLED -> EMPTY`).
+`peek_stream_id()` allows non-destructive filtering for multi-subscription on shared bridge.
 
 ---
 
@@ -923,7 +953,7 @@ flowchart TD
 | `context.rs`                        | 574          | 29+      | Driver configuration            |
 | `agent/mod.rs`                      | 86           | 4        | Agent trait                     |
 | `agent/sender.rs`                   | 1106         | 16       | Sender agent                    |
-| `agent/receiver.rs`                 | 1510         | 30+      | Receiver agent                  |
+| `agent/receiver.rs`                 | 2134         | 30+      | Receiver agent                  |
 | `agent/conductor.rs`                | 692          | 7        | Conductor agent                 |
 | `agent/runner.rs`                   | 304          | 6        | Agent runner + thread lifecycle |
 | `agent/idle_strategy.rs`            | 309          | 10       | Idle strategies                 |
@@ -935,6 +965,7 @@ flowchart TD
 | `media/term_buffer.rs`              | 1050         | 44       | RawLog + SharedLogBuffer        |
 | `media/network_publication.rs`      | 794          | 32       | Single-thread publication       |
 | `media/concurrent_publication.rs`   | 1018         | 30       | Cross-thread publication        |
+| `media/shared_image.rs`             | 1094         | 19       | Shared image (recv->subscriber) |
 | `media/send_channel_endpoint.rs`    | 560          | -        | Send endpoint                   |
 | `media/receive_channel_endpoint.rs` | 529          | -        | Receive endpoint                |
 | `media/retransmit_handler.rs`       | 370          | 11       | NAK retransmit scheduler        |
@@ -945,9 +976,10 @@ flowchart TD
 | `client/media_driver.rs`            | 166          | -        | Driver orchestrator             |
 | `client/aeron.rs`                   | 322          | 2        | Aeron client                    |
 | `client/bridge.rs`                  | 142          | 3        | Publication bridge              |
+| `client/sub_bridge.rs`              | 404          | 8        | Subscription bridge             |
 | `client/publication.rs`             | 137          | -        | Publication handle              |
-| `client/subscription.rs`            | 94           | -        | Subscription handle             |
-| **Total**                           | **~14,500+** | **280+** |                                 |
+| `client/subscription.rs`            | 187          | -        | Subscription handle (poll)      |
+| **Total**                           | **~17,000+** | **310+** |                                 |
 
 ---
 
